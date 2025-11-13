@@ -1,0 +1,29 @@
+{
+  "name": "irobot-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "网页行为监控系统 - Web Behavior Monitoring System",
+  "main": "index.js",
+  "scripts": {
+    "build:injector": "pnpm --filter injector build",
+    "build:dashboard": "pnpm --filter dashboard build && pnpm --filter dashboard build:server",
+    "build": "pnpm build:injector && pnpm build:dashboard",
+    "dev:dashboard": "pnpm --filter dashboard dev",
+    "dev:server": "pnpm --filter dashboard dev:server",
+    "dev": "pnpm run -r --parallel dev",
+    "start": "pnpm --filter dashboard run server",
+    "clean": "rm -rf packages/*/dist packages/*/node_modules node_modules"
+  },
+  "keywords": [
+    "monitoring",
+    "puppeteer",
+    "websocket",
+    "api-monitoring"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

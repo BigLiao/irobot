@@ -1,0 +1,19 @@
+{
+  "name": "injector",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build:monitor": "esbuild src/monitor.ts --bundle --outfile=dist/monitor-bundle.js --format=iife",
+    "build:main": "esbuild src/index.ts --bundle --outfile=dist/index.js --format=esm --platform=node --packages=external",
+    "build": "pnpm build:monitor && pnpm build:main",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "puppeteer": "^21.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.0.0"
+  }
+}
