@@ -21,6 +21,18 @@ const dashboardSockets = new Set<WebSocket>();
 let injectorSocket: WebSocket | null = null;
 let injectorProcess: ChildProcess | null = null;
 
+// 存储修改规则
+interface MockRule {
+  id: string;
+  match: {
+    api: string;
+  };
+  response: any;
+  enabled: boolean;
+}
+
+let mockRules: MockRule[] = [];
+
 // WebSocket连接处理
 wss.on('connection', (ws, req) => {
   const url = req.url || '';
@@ -55,6 +67,21 @@ wss.on('connection', (ws, req) => {
             timestamp: new Date().toISOString()
           });
         }
+        
+        // 处理修改规则更新
+        if (data.type === 'UPDATE_MOCK_RULES' && data.rules) {
+          console.log('收到修改规则更新:', data.rules);
+          mockRules = data.rules;
+          
+          // 转发给injector
+          if (injectorSocket && injectorSocket.readyState === WebSocket.OPEN) {
+            injectorSocket.send(JSON.stringify({
+              type: 'UPDATE_MOCK_RULES',
+              rules: mockRules
+            }));
+            console.log('已转发修改规则到injector');
+          }
+        }
       } catch (error) {
         console.error('处理dashboard消息错误:', error);
       }
@@ -68,6 +95,15 @@ wss.on('connection', (ws, req) => {
   } else if (url.startsWith('/injector')) {
     console.log('Injector 客户端已连接');
     injectorSocket = ws;
+    
+    // 发送当前的修改规则给injector
+    if (mockRules.length > 0) {
+      ws.send(JSON.stringify({
+        type: 'UPDATE_MOCK_RULES',
+        rules: mockRules
+      }));
+      console.log('已发送修改规则到新连接的injector');
+    }
     
     ws.on('message', (message) => {
       const data = message.toString();
@@ -109,12 +145,14 @@ function startInjector(url: string) {
   
   console.log(`启动 injector 进程: ${injectorPath}`);
   console.log(`目标 URL: ${url}`);
+  console.log(`当前修改规则数量: ${mockRules.length}`);
   
   injectorProcess = spawn('node', [injectorPath, url], {
     stdio: 'inherit',
     env: {
       ...process.env,
-      DASHBOARD_WS_URL: 'ws://localhost:3000/injector'
+      DASHBOARD_WS_URL: 'ws://localhost:3000/injector',
+      MOCK_RULES: JSON.stringify(mockRules) // 通过环境变量传递修改规则
     }
   });
   

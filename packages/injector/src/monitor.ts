@@ -7,6 +7,8 @@ declare global {
   interface Window {
     __IROBOT_MONITOR_LOADED__?: boolean;
   }
+  // 占位符变量 - 在注入时会被替换为实际值
+  const MOCK_RULES_PLACEHOLDER: any;
 }
 
 type FingerprintCategory = 'canvas' | 'webgl' | 'font' | 'webrtc' | 'audio' | 'screen' | 'navigator' | 'media' | 'battery' | 'performance';
@@ -20,6 +22,16 @@ interface FingerprintEventPayload {
   url: string;
   stack?: string;
   eventHash?: string; // 事件唯一标识，用于去重
+  modified?: boolean; // 是否被修改过
+}
+
+interface MockRule {
+  id: string;
+  match: {
+    api: string;
+  };
+  response: any;
+  enabled: boolean;
 }
 
 const WEBSOCKET_URL = 'WS_URL_PLACEHOLDER';
@@ -28,6 +40,9 @@ const MESSAGE_QUEUE_LIMIT = 500;
 const pendingMessages: string[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
+
+// 存储修改规则 - 从注入时的初始规则开始
+let mockRules: MockRule[] = MOCK_RULES_PLACEHOLDER as any;
 
 // 快照缓存
 const snapshotCache = new WeakMap<HTMLCanvasElement | OffscreenCanvas, string>();
@@ -40,6 +55,10 @@ if (window.__IROBOT_MONITOR_LOADED__) {
 } else {
   window.__IROBOT_MONITOR_LOADED__ = true;
   console.log('[Injector] 指纹 Hook 初始化');
+  console.log(`[Injector] 初始修改规则数量: ${mockRules.length}`);
+  if (mockRules.length > 0) {
+    console.log('[Injector] 修改规则:', mockRules.map(r => `${r.match.api}${r.enabled ? '' : ' (已禁用)'}`).join(', '));
+  }
   setupHooks();
   initWebSocket();
 }
@@ -86,6 +105,23 @@ function getWebSocket(wsUrl: string) {
     sendMessage('FINGERPRINT_MONITOR_READY', {
       message: '指纹 API Hook 已启用',
     });
+  });
+
+  socket.addEventListener('message', (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      
+      // 接收修改规则更新
+      if (data.type === 'UPDATE_MOCK_RULES' && data.rules) {
+        mockRules = data.rules;
+        console.log(`[Injector] 运行时更新修改规则，数量: ${mockRules.length}`);
+        if (mockRules.length > 0) {
+          console.log('[Injector] 当前修改规则:', mockRules.map(r => `${r.match.api}${r.enabled ? '' : ' (已禁用)'}`).join(', '));
+        }
+      }
+    } catch (error) {
+      console.error('[Injector] 解析消息错误:', error);
+    }
   });
 
   socket.addEventListener('error', (error) => {
@@ -136,6 +172,9 @@ function reportFingerprintEvent(category: FingerprintCategory, api: string, deta
   // 生成事件 Hash，用于在 Dashboard 端去重和计数
   const eventHash = generateEventHash(category, api, detail);
   
+  // 检查是否有匹配的修改规则
+  const matchedRule = findMatchingMockRule(api);
+  
   const payload: FingerprintEventPayload = {
     category,
     api,
@@ -143,8 +182,19 @@ function reportFingerprintEvent(category: FingerprintCategory, api: string, deta
     url: window.location.href,
     stack: captureStack(),
     eventHash,
+    modified: !!matchedRule, // 标记是否被修改
   };
   sendMessage('FINGERPRINT_EVENT', payload);
+}
+
+// 查找匹配的修改规则
+function findMatchingMockRule(api: string): MockRule | null {
+  for (const rule of mockRules) {
+    if (rule.enabled && rule.match.api === api) {
+      return rule;
+    }
+  }
+  return null;
 }
 
 // 生成事件唯一标识
@@ -189,12 +239,12 @@ function hookCanvasApis() {
     originalToDataURL = canvasProto.toDataURL;
     
     // toDataURL 是明确的指纹采集信号
-    hookMethod(canvasProto, 'toDataURL', 'canvas', function (args) {
+    hookMethod(canvasProto, 'toDataURL', 'canvas', 'HTMLCanvasElement.prototype.toDataURL', function (args) {
       return buildCanvasDetail(this as HTMLCanvasElement, args, 'toDataURL', true);
     });
     
     // toBlob 也是明确的指纹采集信号
-    hookMethod(canvasProto, 'toBlob', 'canvas', function (args) {
+    hookMethod(canvasProto, 'toBlob', 'canvas', 'HTMLCanvasElement.prototype.toBlob', function (args) {
       return buildCanvasDetail(this as HTMLCanvasElement, args, 'toBlob', true);
     });
     
@@ -215,7 +265,7 @@ function hookCanvasApis() {
     const ctxProto = CanvasRenderingContext2D.prototype;
     
     // getImageData 是指纹采集的关键方法
-    hookMethod(ctxProto, 'getImageData', 'canvas', function (args) {
+    hookMethod(ctxProto, 'getImageData', 'canvas', 'CanvasRenderingContext2D.prototype.getImageData', function (args) {
       const canvas = (this as CanvasRenderingContext2D).canvas;
       return {
         sx: args[0],
@@ -229,7 +279,7 @@ function hookCanvasApis() {
 
   if (typeof OffscreenCanvas !== 'undefined') {
     const offscreenProto = OffscreenCanvas.prototype as any;
-    hookMethod(offscreenProto, 'convertToBlob', 'canvas', function (args) {
+    hookMethod(offscreenProto, 'convertToBlob', 'canvas', 'OffscreenCanvas.prototype.convertToBlob', function (args) {
       const options = args[0] || {};
       return {
         type: options.type,
@@ -373,7 +423,7 @@ function hookFontApis() {
   const fontSetProto = getFontFaceSetPrototype();
   if (fontSetProto) {
     // check() 方法：检查字体是否可用
-    hookMethod(fontSetProto, 'check', 'font', (args) => {
+    hookMethod(fontSetProto, 'check', 'font', 'FontFaceSet.prototype.check', (args) => {
       return {
         font: args[0],
         sample: truncateText(args[1]),
@@ -381,7 +431,7 @@ function hookFontApis() {
     });
     
     // load() 方法：加载字体
-    hookMethod(fontSetProto, 'load', 'font', (args) => {
+    hookMethod(fontSetProto, 'load', 'font', 'FontFaceSet.prototype.load', (args) => {
       return {
         font: args[0],
         sample: truncateText(args[1]),
@@ -550,26 +600,13 @@ function getFontFaceSetPrototype() {
 }
 
 function hookWebGLApis() {
-  const prototypes: any[] = [];
+  // WebGLRenderingContext (WebGL 1.0)
   if (typeof WebGLRenderingContext !== 'undefined') {
-    prototypes.push(WebGLRenderingContext.prototype);
-  }
-  if (typeof WebGL2RenderingContext !== 'undefined') {
-    prototypes.push(WebGL2RenderingContext.prototype);
-  }
-
-  prototypes.forEach((proto) => {
-    // getParameter 是关键的指纹采集方法
-    hookMethod(proto, 'getParameter', 'webgl', (args) => ({ parameter: args[0] }));
-    
-    // getExtension 用于检测支持的扩展
-    hookMethod(proto, 'getExtension', 'webgl', (args) => ({ name: args[0] }));
-    
-    // getSupportedExtensions 是明确的指纹采集
-    hookMethod(proto, 'getSupportedExtensions', 'webgl');
-    
-    // readPixels 可能频繁调用，不捕获快照
-    hookMethod(proto, 'readPixels', 'webgl', function (args) {
+    const proto = WebGLRenderingContext.prototype;
+    hookMethod(proto, 'getParameter', 'webgl', 'WebGLRenderingContext.prototype.getParameter', (args) => ({ parameter: args[0] }));
+    hookMethod(proto, 'getExtension', 'webgl', 'WebGLRenderingContext.prototype.getExtension', (args) => ({ name: args[0] }));
+    hookMethod(proto, 'getSupportedExtensions', 'webgl', 'WebGLRenderingContext.prototype.getSupportedExtensions');
+    hookMethod(proto, 'readPixels', 'webgl', 'WebGLRenderingContext.prototype.readPixels', function (args) {
       return {
         x: args[0],
         y: args[1],
@@ -577,10 +614,27 @@ function hookWebGLApis() {
         height: args[3],
         format: args[4],
         type: args[5],
-        // 不捕获快照，readPixels 可能被频繁调用
       };
     });
-  });
+  }
+  
+  // WebGL2RenderingContext (WebGL 2.0)
+  if (typeof WebGL2RenderingContext !== 'undefined') {
+    const proto = WebGL2RenderingContext.prototype;
+    hookMethod(proto, 'getParameter', 'webgl', 'WebGL2RenderingContext.prototype.getParameter', (args) => ({ parameter: args[0] }));
+    hookMethod(proto, 'getExtension', 'webgl', 'WebGL2RenderingContext.prototype.getExtension', (args) => ({ name: args[0] }));
+    hookMethod(proto, 'getSupportedExtensions', 'webgl', 'WebGL2RenderingContext.prototype.getSupportedExtensions');
+    hookMethod(proto, 'readPixels', 'webgl', 'WebGL2RenderingContext.prototype.readPixels', function (args) {
+      return {
+        x: args[0],
+        y: args[1],
+        width: args[2],
+        height: args[3],
+        format: args[4],
+        type: args[5],
+      };
+    });
+  }
 }
 
 function hookWebRTCApis() {
@@ -608,21 +662,21 @@ function hookWebRTCApis() {
   }) as typeof OriginalRTCPeerConnection;
 
   const proto = OriginalRTCPeerConnection.prototype as any;
-  hookMethod(proto, 'createDataChannel', 'webrtc', (args) => ({
+  hookMethod(proto, 'createDataChannel', 'webrtc', 'RTCPeerConnection.prototype.createDataChannel', (args) => ({
     label: args[0],
     ordered: args[1]?.ordered,
     negotiated: args[1]?.negotiated,
     protocol: args[1]?.protocol,
   }));
-  hookMethod(proto, 'createOffer', 'webrtc', (args) => ({
+  hookMethod(proto, 'createOffer', 'webrtc', 'RTCPeerConnection.prototype.createOffer', (args) => ({
     hasOptions: Boolean(args[0]),
     optionKeys: args[0] ? Object.keys(args[0]) : [],
   }));
-  hookMethod(proto, 'createAnswer', 'webrtc', (args) => ({
+  hookMethod(proto, 'createAnswer', 'webrtc', 'RTCPeerConnection.prototype.createAnswer', (args) => ({
     hasOptions: Boolean(args[0]),
     optionKeys: args[0] ? Object.keys(args[0]) : [],
   }));
-  hookMethod(proto, 'setLocalDescription', 'webrtc', (args) => {
+  hookMethod(proto, 'setLocalDescription', 'webrtc', 'RTCPeerConnection.prototype.setLocalDescription', (args) => {
     const desc = args[0];
     if (!desc) {
       return undefined;
@@ -632,7 +686,7 @@ function hookWebRTCApis() {
       sdpLength: desc.sdp ? desc.sdp.length : 0,
     };
   });
-  hookMethod(proto, 'addIceCandidate', 'webrtc', (args) => {
+  hookMethod(proto, 'addIceCandidate', 'webrtc', 'RTCPeerConnection.prototype.addIceCandidate', (args) => {
     const candidate = args[0];
     if (!candidate) {
       return undefined;
@@ -652,7 +706,7 @@ function hookWebRTCApis() {
 
 type DetailBuilder = (this: any, args: any[]) => Record<string, any> | void;
 
-function hookMethod(target: any, methodName: string, category: FingerprintCategory, detailBuilder?: DetailBuilder) {
+function hookMethod(target: any, methodName: string, category: FingerprintCategory, fullApiName: string, detailBuilder?: DetailBuilder) {
   if (!target || typeof target[methodName] !== 'function') {
     return;
   }
@@ -666,9 +720,44 @@ function hookMethod(target: any, methodName: string, category: FingerprintCatego
     const startTime = performance.now();
     let result: any;
     let error: any;
+    let modified = false;
+    
+    // 检查是否有匹配的修改规则 - 使用完整API名称
+    const matchedRule = findMatchingMockRule(fullApiName);
     
     try {
       result = original.apply(this, args);
+      
+      // 如果有匹配的修改规则，替换返回值
+      if (matchedRule && !error) {
+        const mockResponse = matchedRule.response;
+        
+        // 如果原始返回值是Promise，需要特殊处理
+        if (result instanceof Promise) {
+          result = result.then(() => {
+            // 解析mock响应
+            const parsedResponse = typeof mockResponse === 'string' 
+              ? (mockResponse.startsWith('{') || mockResponse.startsWith('[') 
+                  ? JSON.parse(mockResponse) 
+                  : mockResponse)
+              : mockResponse;
+            
+            console.log(`[Injector] 修改了 ${fullApiName} 的返回值:`, parsedResponse);
+            return parsedResponse;
+          });
+        } else {
+          // 同步返回值直接替换
+          const parsedResponse = typeof mockResponse === 'string' 
+            ? (mockResponse.startsWith('{') || mockResponse.startsWith('[') 
+                ? JSON.parse(mockResponse) 
+                : mockResponse)
+            : mockResponse;
+          
+          result = parsedResponse;
+          console.log(`[Injector] 修改了 ${fullApiName} 的返回值:`, result);
+        }
+        modified = true;
+      }
     } catch (e) {
       error = e;
       throw e;
@@ -689,7 +778,7 @@ function hookMethod(target: any, methodName: string, category: FingerprintCatego
           // 异步结果，等待 Promise 完成后再上报
           result.then(
             (resolvedValue) => {
-              reportFingerprintEvent(category, String(methodName), {
+              reportFingerprintEvent(category, fullApiName, {
                 ...detail,
                 duration,
                 input,
@@ -697,7 +786,7 @@ function hookMethod(target: any, methodName: string, category: FingerprintCatego
               });
             },
             (rejectedError) => {
-              reportFingerprintEvent(category, String(methodName), {
+              reportFingerprintEvent(category, fullApiName, {
                 ...detail,
                 duration,
                 input,
@@ -710,14 +799,14 @@ function hookMethod(target: any, methodName: string, category: FingerprintCatego
           output = serializeValue(result);
         }
         
-        reportFingerprintEvent(category, String(methodName), {
+        reportFingerprintEvent(category, fullApiName, {
           ...detail,
           duration,
           input,
           output,
         });
       } catch (reportError) {
-        console.error('[Injector] Hook 上报异常:', methodName, reportError);
+        console.error('[Injector] Hook 上报异常:', fullApiName, reportError);
       }
     }
     
@@ -870,10 +959,10 @@ function hookAudioApis() {
   // Hook AudioContext 关键方法
   const proto = OriginalAudioContext.prototype;
   if (proto) {
-    hookMethod(proto, 'createOscillator', 'audio');
-    hookMethod(proto, 'createAnalyser', 'audio');
-    hookMethod(proto, 'createDynamicsCompressor', 'audio');
-    hookMethod(proto, 'createScriptProcessor', 'audio', (args) => ({
+    hookMethod(proto, 'createOscillator', 'audio', 'AudioContext.prototype.createOscillator');
+    hookMethod(proto, 'createAnalyser', 'audio', 'AudioContext.prototype.createAnalyser');
+    hookMethod(proto, 'createDynamicsCompressor', 'audio', 'AudioContext.prototype.createDynamicsCompressor');
+    hookMethod(proto, 'createScriptProcessor', 'audio', 'AudioContext.prototype.createScriptProcessor', (args) => ({
       bufferSize: args[0],
       numberOfInputChannels: args[1],
       numberOfOutputChannels: args[2],
@@ -1004,9 +1093,9 @@ function hookMediaDevicesApis() {
   if (proto && proto.enumerateDevices) {
     const original = proto.enumerateDevices;
     proto.enumerateDevices = async function () {
-      reportFingerprintEvent('media', 'enumerateDevices', undefined);
+      reportFingerprintEvent('media', 'MediaDevices.prototype.enumerateDevices', undefined);
       const result = await original.apply(this, arguments as any);
-      reportFingerprintEvent('media', 'enumerateDevices.result', {
+      reportFingerprintEvent('media', 'MediaDevices.prototype.enumerateDevices.result', {
         deviceCount: result.length,
         kinds: result.map((d: MediaDeviceInfo) => d.kind),
       });
@@ -1018,7 +1107,7 @@ function hookMediaDevicesApis() {
   if (proto && proto.getUserMedia) {
     const original = proto.getUserMedia;
     proto.getUserMedia = function (constraints: MediaStreamConstraints) {
-      reportFingerprintEvent('media', 'getUserMedia', {
+      reportFingerprintEvent('media', 'MediaDevices.prototype.getUserMedia', {
         audio: typeof constraints?.audio,
         video: typeof constraints?.video,
       });
@@ -1034,9 +1123,9 @@ function hookBatteryApis() {
 
   const original = nav.getBattery;
   nav.getBattery = async function () {
-    reportFingerprintEvent('battery', 'getBattery', undefined);
+    reportFingerprintEvent('battery', 'navigator.getBattery', undefined);
     const battery = await original.apply(this, arguments as any);
-    reportFingerprintEvent('battery', 'getBattery.result', {
+    reportFingerprintEvent('battery', 'navigator.getBattery.result', {
       charging: battery.charging,
       level: battery.level,
       chargingTime: battery.chargingTime,
@@ -1066,7 +1155,7 @@ function hookPerformanceApis() {
   if (performance.getEntriesByType) {
     const original = performance.getEntriesByType;
     (performance as any).getEntriesByType = function (type: string) {
-      reportFingerprintEvent('performance', 'getEntriesByType', { type });
+      reportFingerprintEvent('performance', 'performance.getEntriesByType', { type });
       return original.apply(this, arguments as any);
     };
   }

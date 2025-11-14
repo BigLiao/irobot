@@ -18,10 +18,22 @@ const tmpUserDir = mkdtempSync(path.join(os.tmpdir(), 'puppeteer_profile_'));
 const targetUrl = process.argv[2] || 'https://www.baidu.com';
 const dashboardWsUrl = process.env.DASHBOARD_WS_URL || 'ws://localhost:3000/injector';
 
+// 从环境变量获取修改规则
+let mockRules: any[] = [];
+try {
+  const mockRulesJson = process.env.MOCK_RULES;
+  if (mockRulesJson) {
+    mockRules = JSON.parse(mockRulesJson);
+  }
+} catch (error: any) {
+  console.error('❌ 解析修改规则失败:', error);
+}
+
 console.log('===========================================');
 console.log('🤖 iRobot Injector 启动中...');
 console.log(`目标 URL: ${targetUrl}`);
 console.log(`Dashboard WebSocket: ${dashboardWsUrl}`);
+console.log(`修改规则数量: ${mockRules.length}`);
 console.log('===========================================');
 
 // 读取并准备注入脚本
@@ -32,6 +44,8 @@ try {
   injectorScript = fs.readFileSync(monitorScriptPath, 'utf-8');
   // 替换WebSocket URL占位符
   injectorScript = injectorScript.replace('WS_URL_PLACEHOLDER', dashboardWsUrl);
+  // 替换修改规则占位符 - 注入初始规则
+  injectorScript = injectorScript.replace('MOCK_RULES_PLACEHOLDER', JSON.stringify(mockRules));
   console.log('✅ 监控脚本已加载');
 } catch (error) {
   console.error('❌ 无法读取监控脚本:', error);

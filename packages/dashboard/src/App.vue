@@ -7,6 +7,17 @@ interface Log {
   timestamp: string;
   count?: number; // 调用次数
   eventHash?: string; // 事件哈希，用于去重
+  modified?: boolean; // 是否被修改过
+}
+
+interface MockRule {
+  id: string;
+  match: {
+    api: string; // API名称完整匹配
+    // 未来可扩展: input?: any; // 入参匹配
+  };
+  response: any; // 返回数据
+  enabled: boolean; // 是否启用
 }
 
 const logs = ref<Log[]>([]);
@@ -15,6 +26,10 @@ const targetUrl = ref('https://www.baidu.com');
 const isMonitoring = ref(false);
 const wsConnected = ref(false);
 const selectedCategory = ref<string>('all');
+const activeTab = ref<'intercept' | 'mock'>('intercept');
+const mockRules = ref<MockRule[]>([]);
+const editingRule = ref<MockRule | null>(null);
+const showRuleEditor = ref(false);
 
 const categories = computed(() => {
   const categoryCount: Record<string, number> = {
@@ -98,6 +113,8 @@ const connectWebSocket = () => {
           data: { message: log.data?.message || '指纹 Hook 已启用' },
           timestamp: log.timestamp
         });
+        // 发送修改规则到injector
+        sendMockRules();
       } else if (log.type === 'FINGERPRINT_EVENT' && log.data?.eventHash) {
         // 指纹事件：根据 eventHash 去重和计数
         const eventHash = log.data.eventHash;
@@ -107,12 +124,17 @@ const connectWebSocket = () => {
           // 已存在相同事件，增加计数
           logs.value[existingIndex].count = (logs.value[existingIndex].count || 1) + 1;
           logs.value[existingIndex].timestamp = log.timestamp; // 更新最后调用时间
+          // 更新modified标记
+          if (log.data?.modified) {
+            logs.value[existingIndex].modified = true;
+          }
         } else {
           // 新事件，添加到列表
           const newLog: Log = {
             ...log,
             count: 1,
             eventHash,
+            modified: log.data?.modified || false,
           };
           logs.value.unshift(newLog);
           // 更新 hash 映射（索引会因为 unshift 而改变，需要重建）
@@ -247,14 +269,105 @@ function openImagePreview(dataUrl: string) {
   }
 }
 
+// ============= 修改规则管理 =============
+function createMockRule(api: string = '', response: any = '') {
+  editingRule.value = {
+    id: Date.now().toString(),
+    match: { api },
+    response,
+    enabled: true,
+  };
+  showRuleEditor.value = true;
+  activeTab.value = 'mock';
+}
+
+function editMockRule(rule: MockRule) {
+  editingRule.value = { ...rule };
+  showRuleEditor.value = true;
+}
+
+function saveMockRule() {
+  if (!editingRule.value) return;
+  
+  try {
+    // 验证response是否为有效JSON
+    if (typeof editingRule.value.response === 'string') {
+      JSON.parse(editingRule.value.response);
+    }
+    
+    const index = mockRules.value.findIndex(r => r.id === editingRule.value!.id);
+    if (index !== -1) {
+      mockRules.value[index] = { ...editingRule.value };
+    } else {
+      mockRules.value.push({ ...editingRule.value });
+    }
+    
+    showRuleEditor.value = false;
+    editingRule.value = null;
+    
+    // 发送更新后的规则到服务器
+    sendMockRules();
+  } catch (error) {
+    alert('Response 格式错误，请输入有效的 JSON');
+  }
+}
+
+function deleteMockRule(id: string) {
+  if (confirm('确定删除此规则？')) {
+    mockRules.value = mockRules.value.filter(r => r.id !== id);
+    sendMockRules();
+  }
+}
+
+function toggleMockRule(rule: MockRule) {
+  rule.enabled = !rule.enabled;
+  sendMockRules();
+}
+
+function cancelEditRule() {
+  showRuleEditor.value = false;
+  editingRule.value = null;
+}
+
+function quickMockFromLog(log: Log) {
+  if (log.type !== 'FINGERPRINT_EVENT' || !log.data?.api) return;
+  
+  const api = log.data.api;
+  const output = log.data.detail?.output;
+  
+  createMockRule(api, output ? JSON.stringify(output, null, 2) : '');
+}
+
+function sendMockRules() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const enabledRules = mockRules.value.filter(r => r.enabled);
+    ws.send(JSON.stringify({
+      type: 'UPDATE_MOCK_RULES',
+      rules: enabledRules
+    }));
+    console.log('发送修改规则:', enabledRules);
+  }
+}
+
 onMounted(() => {
   connectWebSocket();
+  // 从localStorage恢复修改规则
+  const savedRules = localStorage.getItem('irobot_mock_rules');
+  if (savedRules) {
+    try {
+      mockRules.value = JSON.parse(savedRules);
+    } catch (error) {
+      console.error('恢复修改规则失败:', error);
+    }
+  }
 });
 
 onUnmounted(() => {
   if (ws) {
     ws.close();
   }
+  // 保存修改规则到localStorage
+  localStorage.setItem('irobot_mock_rules', JSON.stringify(mockRules.value));
 });
 </script>
 
@@ -312,21 +425,40 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="category-filter">
-      <button
-        v-for="(count, cat) in categories"
-        :key="cat"
-        class="category-btn"
-        :class="{ active: selectedCategory === cat }"
-        @click="selectedCategory = cat"
+    <div class="tab-container">
+      <button 
+        class="tab-btn" 
+        :class="{ active: activeTab === 'intercept' }"
+        @click="activeTab = 'intercept'"
       >
-        <span class="category-icon">{{ getCategoryIcon(cat) }}</span>
-        <span class="category-name">{{ cat === 'all' ? '全部' : cat }}</span>
-        <span class="category-count">{{ count }}</span>
+        📡 拦截
+      </button>
+      <button 
+        class="tab-btn" 
+        :class="{ active: activeTab === 'mock' }"
+        @click="activeTab = 'mock'"
+      >
+        🔧 修改
       </button>
     </div>
 
-    <div class="logs-container">
+    <!-- 拦截模块 -->
+    <div v-show="activeTab === 'intercept'">
+      <div class="category-filter">
+        <button
+          v-for="(count, cat) in categories"
+          :key="cat"
+          class="category-btn"
+          :class="{ active: selectedCategory === cat }"
+          @click="selectedCategory = cat"
+        >
+          <span class="category-icon">{{ getCategoryIcon(cat) }}</span>
+          <span class="category-name">{{ cat === 'all' ? '全部' : cat }}</span>
+          <span class="category-count">{{ count }}</span>
+        </button>
+      </div>
+
+      <div class="logs-container">
       <div v-if="filteredLogs.length === 0" class="empty-state">
         <p>暂无日志记录</p>
         <p class="hint">输入URL并点击"开始监控"按钮开始监控网页行为</p>
@@ -352,6 +484,12 @@ onUnmounted(() => {
             <span v-if="log.data.detail?.duration" class="duration-badge">
               {{ log.data.detail.duration.toFixed(2) }}ms
             </span>
+            <span v-if="log.modified" class="modified-badge">
+              ✅ 已修改
+            </span>
+            <button class="quick-mock-btn" @click="quickMockFromLog(log)" title="快捷添加到修改模块">
+              🔧 修改
+            </button>
           </div>
           <div v-if="log.data.url" class="url-info">
             <strong>URL:</strong> <span class="url-text">{{ log.data.url }}</span>
@@ -407,6 +545,87 @@ onUnmounted(() => {
         </div>
 
         <pre v-else class="log-data">{{ JSON.stringify(log.data, null, 2) }}</pre>
+      </div>
+    </div>
+    </div>
+
+    <!-- 修改模块 -->
+    <div v-show="activeTab === 'mock'" class="mock-container">
+      <div class="mock-header">
+        <h2>返回值修改规则</h2>
+        <button class="btn btn-primary" @click="createMockRule()">
+          ➕ 新建规则
+        </button>
+      </div>
+
+      <div v-if="mockRules.length === 0" class="empty-state">
+        <p>暂无修改规则</p>
+        <p class="hint">点击"新建规则"或在拦截模块中点击"修改"按钮快捷添加</p>
+      </div>
+
+      <div v-else class="mock-rules-list">
+        <div v-for="rule in mockRules" :key="rule.id" class="mock-rule-item">
+          <div class="rule-header">
+            <div class="rule-toggle">
+              <input 
+                type="checkbox" 
+                :checked="rule.enabled" 
+                @change="toggleMockRule(rule)"
+                class="toggle-checkbox"
+              />
+              <span class="rule-api">{{ rule.match.api }}</span>
+            </div>
+            <div class="rule-actions">
+              <button class="btn-icon" @click="editMockRule(rule)" title="编辑">
+                ✏️
+              </button>
+              <button class="btn-icon" @click="deleteMockRule(rule.id)" title="删除">
+                🗑️
+              </button>
+            </div>
+          </div>
+          <div class="rule-response">
+            <strong>Response:</strong>
+            <pre>{{ typeof rule.response === 'string' ? rule.response : JSON.stringify(rule.response, null, 2) }}</pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- 规则编辑器 -->
+      <div v-if="showRuleEditor" class="rule-editor-overlay" @click.self="cancelEditRule">
+        <div class="rule-editor">
+          <h3>{{ editingRule?.id && mockRules.find(r => r.id === editingRule?.id) ? '编辑' : '新建' }}规则</h3>
+          
+          <div class="form-group">
+            <label>API 名称 (完整匹配):</label>
+            <input 
+              v-model="editingRule!.match.api" 
+              type="text" 
+              placeholder="例如: toDataURL"
+              class="form-input"
+            />
+          </div>
+
+          <div class="form-group">
+            <label>Response (JSON格式):</label>
+            <textarea 
+              v-model="editingRule!.response" 
+              placeholder='例如: "data:image/png;base64,..."'
+              class="form-textarea"
+              rows="10"
+            ></textarea>
+            <p class="hint">输入要返回的数据，支持JSON格式</p>
+          </div>
+
+          <div class="form-actions">
+            <button class="btn btn-primary" @click="saveMockRule">
+              保存
+            </button>
+            <button class="btn btn-secondary" @click="cancelEditRule">
+              取消
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -634,6 +853,38 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.3);
 }
 
+.tab-container {
+  background: white;
+  padding: 15px 20px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  display: flex;
+  gap: 12px;
+}
+
+.tab-btn {
+  padding: 10px 24px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  background: white;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.tab-btn:hover {
+  border-color: #667eea;
+  background: #f8f9ff;
+}
+
+.tab-btn.active {
+  border-color: #667eea;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
 .logs-container {
   background: white;
   border-radius: 12px;
@@ -763,6 +1014,33 @@ onUnmounted(() => {
   border-radius: 4px;
   font-size: 11px;
   font-weight: 600;
+}
+
+.modified-badge {
+  background: #2ecc71;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.quick-mock-btn {
+  background: #667eea;
+  color: white;
+  padding: 4px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  transition: all 0.3s;
+}
+
+.quick-mock-btn:hover {
+  background: #5568d3;
+  transform: translateY(-1px);
 }
 
 .url-info {
@@ -1023,5 +1301,199 @@ onUnmounted(() => {
 
 .logs-container::-webkit-scrollbar-thumb:hover {
   background: #555;
+}
+
+/* 修改模块样式 */
+.mock-container {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  min-height: calc(100vh - 480px);
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.mock-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 15px;
+  border-bottom: 2px solid #e0e0e0;
+}
+
+.mock-header h2 {
+  margin: 0;
+  color: #333;
+  font-size: 20px;
+}
+
+.mock-rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mock-rule-item {
+  padding: 15px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  background: #f8f9fa;
+  transition: all 0.3s;
+}
+
+.mock-rule-item:hover {
+  border-color: #667eea;
+  transform: translateX(4px);
+}
+
+.rule-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.rule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toggle-checkbox {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.rule-api {
+  font-weight: 600;
+  font-size: 16px;
+  color: #333;
+}
+
+.rule-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 18px;
+  padding: 4px 8px;
+  transition: transform 0.2s;
+}
+
+.btn-icon:hover {
+  transform: scale(1.2);
+}
+
+.rule-response {
+  background: white;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+}
+
+.rule-response strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #555;
+}
+
+.rule-response pre {
+  margin: 0;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: #333;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.rule-editor-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.rule-editor {
+  background: white;
+  padding: 30px;
+  border-radius: 12px;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+  max-width: 600px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.rule-editor h3 {
+  margin: 0 0 20px 0;
+  color: #333;
+  font-size: 20px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #333;
+}
+
+.form-input {
+  width: 100%;
+  padding: 10px;
+  border: 2px solid #e0e0e0;
+  border-radius: 6px;
+  font-size: 14px;
+  transition: border-color 0.3s;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+.form-textarea {
+  width: 100%;
+  padding: 10px;
+  border: 2px solid #e0e0e0;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: 'Courier New', monospace;
+  resize: vertical;
+  transition: border-color 0.3s;
+}
+
+.form-textarea:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+.form-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+.form-group .hint {
+  margin: 5px 0 0 0;
+  font-size: 12px;
+  color: #999;
 }
 </style>
