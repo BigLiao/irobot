@@ -292,32 +292,250 @@ function captureCanvasSnapshot(canvas: HTMLCanvasElement | OffscreenCanvas, useC
 }
 
 function hookFontApis() {
-  // measureText 太频繁，不监控
-  // if (typeof CanvasRenderingContext2D !== 'undefined') {
-  //   const ctxProto = CanvasRenderingContext2D.prototype;
-  //   hookMethod(ctxProto, 'measureText', 'font', function (args) {
-  //     return {
-  //       text: truncateText(args[0]),
-  //       font: (this as CanvasRenderingContext2D).font,
-  //     };
-  //   });
-  // }
+  // ==================== Font Metrics Measurement ====================
+  // 监控通过 Canvas measureText 进行的字体指纹检测
+  // 这种技术会尝试大量已知字体，通过测量渲染尺寸来检测系统字体
+  
+  if (typeof CanvasRenderingContext2D !== 'undefined') {
+    const ctxProto = CanvasRenderingContext2D.prototype;
+    
+    // Hook measureText - 检测 Font Metrics Measurement
+    // 使用调用频率和字体变化模式来识别指纹采集行为
+    let measureTextCallCount = 0;
+    let lastMeasureFont = '';
+    let fontChangeCount = 0;
+    let lastReportTime = 0;
+    
+    const originalMeasureText = ctxProto.measureText;
+    if (originalMeasureText && typeof originalMeasureText === 'function') {
+      ctxProto.measureText = function(this: CanvasRenderingContext2D, text: string): TextMetrics {
+        const result = originalMeasureText.call(this, text);
+        
+        try {
+          measureTextCallCount++;
+          const currentFont = this.font;
+          
+          // 检测字体变化（指纹检测的特征）
+          if (currentFont !== lastMeasureFont) {
+            fontChangeCount++;
+            lastMeasureFont = currentFont;
+          }
+          
+          // 当检测到频繁的字体测量时上报（可能是指纹采集）
+          // 规则：10 次调用内有 3+ 次字体变化，或总调用次数 > 50
+          const now = Date.now();
+          const shouldReport = (
+            (measureTextCallCount % 10 === 0 && fontChangeCount >= 3) ||
+            (measureTextCallCount === 50) ||
+            (measureTextCallCount % 100 === 0)
+          );
+          
+          if (shouldReport && now - lastReportTime > 1000) {
+            reportFingerprintEvent('font', 'measureText', {
+              totalCalls: measureTextCallCount,
+              fontChanges: fontChangeCount,
+              currentFont: currentFont,
+              sampleText: truncateText(text, 50),
+              textMetrics: {
+                width: result.width,
+                actualBoundingBoxLeft: result.actualBoundingBoxLeft,
+                actualBoundingBoxRight: result.actualBoundingBoxRight,
+                fontBoundingBoxAscent: result.fontBoundingBoxAscent,
+                fontBoundingBoxDescent: result.fontBoundingBoxDescent,
+              },
+            });
+            lastReportTime = now;
+            
+            // 重置计数器
+            if (measureTextCallCount >= 100) {
+              measureTextCallCount = 0;
+              fontChangeCount = 0;
+            }
+          }
+        } catch (e) {
+          console.warn('[Injector] measureText Hook 异常:', e);
+        }
+        
+        return result;
+      };
+      
+      Object.defineProperty(ctxProto.measureText, '__irobot_hooked__', {
+        value: true,
+        enumerable: false,
+        configurable: false,
+        writable: false,
+      });
+    }
+  }
 
-  // 只监控明确的字体检测行为
+  // ==================== Unicode Glyphs Measurement ====================
+  // 监控 FontFaceSet API - 用于检测系统可用字体
   const fontSetProto = getFontFaceSetPrototype();
   if (fontSetProto) {
+    // check() 方法：检查字体是否可用
     hookMethod(fontSetProto, 'check', 'font', (args) => {
       return {
         font: args[0],
         sample: truncateText(args[1]),
       };
     });
+    
+    // load() 方法：加载字体
     hookMethod(fontSetProto, 'load', 'font', (args) => {
       return {
         font: args[0],
         sample: truncateText(args[1]),
       };
     });
+  }
+
+  // ==================== DOM-based Font Detection ====================
+  // 监控通过 DOM 元素尺寸测量进行的字体检测
+  // 这种技术会创建不可见的 DOM 元素，设置不同字体，测量尺寸变化
+  
+  // Hook offsetWidth/offsetHeight getter（用于字体检测的关键属性）
+  if (typeof HTMLElement !== 'undefined') {
+    const elementProto = HTMLElement.prototype;
+    
+    // 跟踪相同文本内容的重复测量（更精确的字体检测特征）
+    const textContentMeasureCount = new Map<string, number>(); // textContent -> count
+    const textContentFonts = new Map<string, Set<string>>();   // textContent -> Set<fontFamily>
+    let lastCleanupTime = Date.now();
+    
+    // Hook offsetWidth
+    const originalOffsetWidthDesc = Object.getOwnPropertyDescriptor(elementProto, 'offsetWidth');
+    if (originalOffsetWidthDesc && originalOffsetWidthDesc.get) {
+      const originalOffsetWidthGet = originalOffsetWidthDesc.get;
+      
+      Object.defineProperty(elementProto, 'offsetWidth', {
+        get() {
+          const value = originalOffsetWidthGet.call(this);
+          
+          try {
+            const element = this as HTMLElement;
+            const textContent = element.textContent || '';
+            
+            // 只跟踪有文本内容的元素
+            if (textContent.length > 0 && textContent.length < 200) {
+              const now = Date.now();
+              
+              // 每 5 秒清理一次计数器，避免内存泄漏
+              if (now - lastCleanupTime > 5000) {
+                textContentMeasureCount.clear();
+                textContentFonts.clear();
+                lastCleanupTime = now;
+              }
+              
+              // 记录该文本内容的测量次数
+              const currentCount = textContentMeasureCount.get(textContent) || 0;
+              textContentMeasureCount.set(textContent, currentCount + 1);
+              
+              // 记录使用的字体
+              const computedStyle = window.getComputedStyle(element);
+              const fontFamily = computedStyle.fontFamily;
+              if (!textContentFonts.has(textContent)) {
+                textContentFonts.set(textContent, new Set());
+              }
+              textContentFonts.get(textContent)!.add(fontFamily);
+              
+              // 检测特征：相同文本被测量 > 5 次，且使用了不同字体
+              const measureCount = textContentMeasureCount.get(textContent)!;
+              const fontCount = textContentFonts.get(textContent)!.size;
+              
+              if (measureCount === 5 || measureCount === 10 || measureCount === 20 || measureCount === 50) {
+                reportFingerprintEvent('font', 'offsetWidth', {
+                  textContent: truncateText(textContent, 50),
+                  measureCount: measureCount,
+                  fontCount: fontCount,
+                  currentFont: fontFamily,
+                  element: element.tagName,
+                  fontSize: computedStyle.fontSize,
+                  value: value,
+                  isHidden: element.offsetParent === null,
+                });
+              }
+            }
+          } catch (e) {
+            // 忽略错误，避免影响正常网页功能
+          }
+          
+          return value;
+        },
+        configurable: true,
+        enumerable: originalOffsetWidthDesc.enumerable,
+      });
+    }
+    
+    // Hook getBoundingClientRect（另一种测量尺寸的方法）
+    const originalGetBoundingClientRect = elementProto.getBoundingClientRect;
+    if (originalGetBoundingClientRect && typeof originalGetBoundingClientRect === 'function') {
+      // 同样跟踪相同文本内容的重复测量
+      const rectTextMeasureCount = new Map<string, number>();
+      const rectTextFonts = new Map<string, Set<string>>();
+      let lastRectCleanupTime = Date.now();
+      
+      elementProto.getBoundingClientRect = function(this: HTMLElement): DOMRect {
+        const result = originalGetBoundingClientRect.call(this);
+        
+        try {
+          const element = this as HTMLElement;
+          const textContent = element.textContent || '';
+          
+          // 只跟踪有文本内容的元素
+          if (textContent.length > 0 && textContent.length < 200) {
+            const now = Date.now();
+            
+            // 每 5 秒清理一次
+            if (now - lastRectCleanupTime > 5000) {
+              rectTextMeasureCount.clear();
+              rectTextFonts.clear();
+              lastRectCleanupTime = now;
+            }
+            
+            // 记录测量次数
+            const currentCount = rectTextMeasureCount.get(textContent) || 0;
+            rectTextMeasureCount.set(textContent, currentCount + 1);
+            
+            // 记录字体
+            const computedStyle = window.getComputedStyle(element);
+            const fontFamily = computedStyle.fontFamily;
+            if (!rectTextFonts.has(textContent)) {
+              rectTextFonts.set(textContent, new Set());
+            }
+            rectTextFonts.get(textContent)!.add(fontFamily);
+            
+            // 相同文本被测量 > 5 次
+            const measureCount = rectTextMeasureCount.get(textContent)!;
+            const fontCount = rectTextFonts.get(textContent)!.size;
+            
+            if (measureCount === 5 || measureCount === 10 || measureCount === 20 || measureCount === 50) {
+              reportFingerprintEvent('font', 'getBoundingClientRect', {
+                textContent: truncateText(textContent, 50),
+                measureCount: measureCount,
+                fontCount: fontCount,
+                currentFont: fontFamily,
+                element: element.tagName,
+                fontSize: computedStyle.fontSize,
+                width: result.width,
+                height: result.height,
+                isHidden: element.offsetParent === null,
+              });
+            }
+          }
+        } catch (e) {
+          // 忽略错误
+        }
+        
+        return result;
+      };
+      
+      Object.defineProperty(elementProto.getBoundingClientRect, '__irobot_hooked__', {
+        value: true,
+        enumerable: false,
+        configurable: false,
+        writable: false,
+      });
+    }
   }
 }
 
