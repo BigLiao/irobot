@@ -6,14 +6,18 @@
     "build:monitor": "esbuild src/monitor.ts --bundle --outfile=dist/monitor-bundle.js --format=iife",
     "build:main": "esbuild src/index.ts --bundle --outfile=dist/index.js --format=esm --platform=node --packages=external",
     "build": "pnpm build:monitor && pnpm build:main",
-    "start": "node dist/index.js"
-  },
-  "dependencies": {
-    "puppeteer": "^21.0.0"
+    "start": "node dist/index.js",
+    "dev:monitor": "esbuild src/monitor.ts --bundle --outfile=dist/monitor-bundle.js --format=iife --watch",
+    "dev:main": "esbuild src/index.ts --bundle --outfile=dist/index.js --format=esm --platform=node --packages=external --watch",
+    "dev": "concurrently \"pnpm run dev:monitor\" \"pnpm run dev:main\""
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "concurrently": "^9.0.1",
     "esbuild": "^0.23.0",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "puppeteer": "^24.30.0"
   }
 }

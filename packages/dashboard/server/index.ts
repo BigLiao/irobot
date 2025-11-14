@@ -149,7 +149,7 @@ function stopInjector() {
 }
 
 // --- Static File Server for Dashboard Frontend ---
-const dashboardPath = path.join(__dirname, '../dist');
+const dashboardPath = path.join(__dirname, '../../dist');
 app.use(express.static(dashboardPath));
 
 // API健康检查
