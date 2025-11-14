@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, ChildProcess } from 'child_process';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,6 +33,7 @@ interface MockRule {
 }
 
 let mockRules: MockRule[] = [];
+let selectedScript: string | null = null; // 存储选定的脚本文件名
 
 // WebSocket连接处理
 wss.on('connection', (ws, req) => {
@@ -48,6 +50,10 @@ wss.on('connection', (ws, req) => {
         // 处理来自dashboard的启动请求
         if (data.type === 'START_MONITOR' && data.url) {
           console.log(`收到监控请求: ${data.url}`);
+          // 保存选定的脚本
+          if (data.script) {
+            selectedScript = data.script;
+          }
           startInjector(data.url);
           
           // 通知所有dashboard客户端
@@ -146,13 +152,15 @@ function startInjector(url: string) {
   console.log(`启动 injector 进程: ${injectorPath}`);
   console.log(`目标 URL: ${url}`);
   console.log(`当前修改规则数量: ${mockRules.length}`);
+  console.log(`选定的自定义脚本: ${selectedScript || '无'}`);
   
   injectorProcess = spawn('node', [injectorPath, url], {
     stdio: 'inherit',
     env: {
       ...process.env,
       DASHBOARD_WS_URL: 'ws://localhost:3000/injector',
-      MOCK_RULES: JSON.stringify(mockRules) // 通过环境变量传递修改规则
+      MOCK_RULES: JSON.stringify(mockRules), // 通过环境变量传递修改规则
+      CUSTOM_SCRIPT: selectedScript || '' // 通过环境变量传递自定义脚本文件名
     }
   });
   
@@ -197,6 +205,29 @@ app.get('/api/health', (req, res) => {
     injectorRunning: injectorProcess !== null,
     dashboardClients: dashboardSockets.size
   });
+});
+
+// 获取 scripts 目录下的 JS 文件列表
+app.get('/api/scripts', (req, res) => {
+  try {
+    const scriptsPath = path.resolve(__dirname, '../../../injector/scripts');
+    
+    // 检查目录是否存在
+    if (!fs.existsSync(scriptsPath)) {
+      return res.json({ scripts: [] });
+    }
+    
+    // 读取目录中的所有文件
+    const files = fs.readdirSync(scriptsPath);
+    
+    // 过滤出 .js 文件
+    const scripts = files.filter(file => file.endsWith('.js'));
+    
+    res.json({ scripts });
+  } catch (error: any) {
+    console.error('读取 scripts 目录失败:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // SPA fallback

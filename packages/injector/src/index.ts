@@ -29,11 +29,15 @@ try {
   console.error('❌ 解析修改规则失败:', error);
 }
 
+// 从环境变量获取自定义脚本文件名
+const customScriptFile = process.env.CUSTOM_SCRIPT || '';
+
 console.log('===========================================');
 console.log('🤖 iRobot Injector 启动中...');
 console.log(`目标 URL: ${targetUrl}`);
 console.log(`Dashboard WebSocket: ${dashboardWsUrl}`);
 console.log(`修改规则数量: ${mockRules.length}`);
+console.log(`自定义脚本: ${customScriptFile || '无'}`);
 console.log('===========================================');
 
 // 读取并准备注入脚本
@@ -50,6 +54,19 @@ try {
 } catch (error) {
   console.error('❌ 无法读取监控脚本:', error);
   process.exit(1);
+}
+
+// 读取自定义脚本
+let customScript = '';
+if (customScriptFile) {
+  try {
+    const customScriptPath = path.join(__dirname, '../scripts', customScriptFile);
+    customScript = fs.readFileSync(customScriptPath, 'utf-8');
+    console.log(`✅ 自定义脚本已加载: ${customScriptFile}`);
+  } catch (error) {
+    console.error(`❌ 无法读取自定义脚本 ${customScriptFile}:`, error);
+    // 不退出,继续执行
+  }
 }
 
 async function main() {
@@ -110,6 +127,18 @@ async function main() {
     await page.evaluate(injectorScript);
 
     console.log('✅ 监控脚本已注入成功');
+
+    // 注入自定义脚本
+    if (customScript) {
+      console.log('\n💉 正在注入自定义脚本...');
+      try {
+        await page.evaluateOnNewDocument(customScript);
+        await page.evaluate(customScript);
+        console.log('✅ 自定义脚本已注入成功');
+      } catch (error) {
+        console.error('❌ 自定义脚本注入失败:', error);
+      }
+    }
     console.log('\n🎯 监控正在进行中...');
     console.log('💡 提示: 在页面中进行的所有 API 调用都会被捕获');
     console.log('💡 提示: 按 Ctrl+C 停止监控并关闭浏览器\n');

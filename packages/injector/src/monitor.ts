@@ -558,7 +558,7 @@ function hookFontApis() {
             const measureCount = rectTextMeasureCount.get(textContent)!;
             const fontCount = rectTextFonts.get(textContent)!.size;
             
-            if (measureCount === 5 || measureCount === 10 || measureCount === 20 || measureCount === 50) {
+            if (measureCount === 10 || measureCount === 20 || measureCount === 30 || measureCount === 50) {
               reportFingerprintEvent('font', 'getBoundingClientRect', {
                 textContent: truncateText(textContent, 50),
                 measureCount: measureCount,

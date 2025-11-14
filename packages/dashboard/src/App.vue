@@ -30,6 +30,8 @@ const activeTab = ref<'intercept' | 'mock'>('intercept');
 const mockRules = ref<MockRule[]>([]);
 const editingRule = ref<MockRule | null>(null);
 const showRuleEditor = ref(false);
+const availableScripts = ref<string[]>([]);
+const selectedScript = ref<string>('');
 
 const categories = computed(() => {
   const categoryCount: Record<string, number> = {
@@ -177,7 +179,8 @@ const startMonitoring = () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       type: 'START_MONITOR',
-      url: targetUrl.value
+      url: targetUrl.value,
+      script: selectedScript.value
     }));
   } else {
     alert('WebSocket 未连接，请稍后重试');
@@ -349,6 +352,17 @@ function sendMockRules() {
   }
 }
 
+// 获取可用的自定义脚本列表
+async function fetchAvailableScripts() {
+  try {
+    const response = await fetch('/api/scripts');
+    const data = await response.json();
+    availableScripts.value = data.scripts || [];
+  } catch (error) {
+    console.error('获取脚本列表失败:', error);
+  }
+}
+
 onMounted(() => {
   connectWebSocket();
   // 从localStorage恢复修改规则
@@ -360,6 +374,13 @@ onMounted(() => {
       console.error('恢复修改规则失败:', error);
     }
   }
+  // 获取可用的脚本列表
+  fetchAvailableScripts();
+  // 从localStorage恢复选定的脚本
+  const savedScript = localStorage.getItem('irobot_selected_script');
+  if (savedScript) {
+    selectedScript.value = savedScript;
+  }
 });
 
 onUnmounted(() => {
@@ -368,6 +389,8 @@ onUnmounted(() => {
   }
   // 保存修改规则到localStorage
   localStorage.setItem('irobot_mock_rules', JSON.stringify(mockRules.value));
+  // 保存选定的脚本到localStorage
+  localStorage.setItem('irobot_selected_script', selectedScript.value);
 });
 </script>
 
@@ -392,6 +415,21 @@ onUnmounted(() => {
           :disabled="isMonitoring"
           @keyup.enter="startMonitoring"
         />
+      </div>
+
+      <div class="input-group">
+        <label for="script-select">注入自定义脚本（可选）：</label>
+        <select 
+          id="script-select"
+          v-model="selectedScript" 
+          :disabled="isMonitoring"
+          class="script-select"
+        >
+          <option value="">无</option>
+          <option v-for="script in availableScripts" :key="script" :value="script">
+            {{ script }}
+          </option>
+        </select>
       </div>
       
       <div class="button-group">
@@ -722,6 +760,27 @@ onUnmounted(() => {
 }
 
 .input-group input:disabled {
+  background-color: #f5f5f5;
+  cursor: not-allowed;
+}
+
+.script-select {
+  width: 100%;
+  padding: 12px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 14px;
+  transition: border-color 0.3s;
+  background-color: white;
+  cursor: pointer;
+}
+
+.script-select:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+.script-select:disabled {
   background-color: #f5f5f5;
   cursor: not-allowed;
 }
