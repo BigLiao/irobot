@@ -1,16 +1,61 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 
 interface Log {
   type: string;
   data: any;
   timestamp: string;
+  count?: number; // 调用次数
+  eventHash?: string; // 事件哈希，用于去重
 }
 
 const logs = ref<Log[]>([]);
+const eventHashMap = new Map<string, number>(); // eventHash -> logs数组索引
 const targetUrl = ref('https://www.baidu.com');
 const isMonitoring = ref(false);
 const wsConnected = ref(false);
+const selectedCategory = ref<string>('all');
+
+const categories = computed(() => {
+  const categoryCount: Record<string, number> = {
+    all: logs.value.length,
+  };
+
+  logs.value.forEach((log) => {
+    if (log.type === 'FINGERPRINT_EVENT' && log.data?.category) {
+      const cat = log.data.category;
+      categoryCount[cat] = (categoryCount[cat] || 0) + 1;
+    }
+  });
+
+  return categoryCount;
+});
+
+const filteredLogs = computed(() => {
+  if (selectedCategory.value === 'all') {
+    return logs.value;
+  }
+  return logs.value.filter(
+    (log) => log.type === 'FINGERPRINT_EVENT' && log.data?.category === selectedCategory.value
+  );
+});
+
+function getCategoryIcon(category: string): string {
+  const icons: Record<string, string> = {
+    canvas: '🎨',
+    webgl: '🖼️',
+    font: '🔤',
+    webrtc: '📡',
+    audio: '🔊',
+    screen: '🖥️',
+    navigator: '🧭',
+    media: '📹',
+    battery: '🔋',
+    performance: '⚡',
+    all: '📊',
+  };
+  return icons[category] || '📋';
+}
 
 let ws: WebSocket | null = null;
 
@@ -47,6 +92,32 @@ const connectWebSocket = () => {
           data: { message: log.message },
           timestamp: log.timestamp
         });
+      } else if (log.type === 'FINGERPRINT_MONITOR_READY') {
+        logs.value.unshift({
+          type: 'SYSTEM',
+          data: { message: log.data?.message || '指纹 Hook 已启用' },
+          timestamp: log.timestamp
+        });
+      } else if (log.type === 'FINGERPRINT_EVENT' && log.data?.eventHash) {
+        // 指纹事件：根据 eventHash 去重和计数
+        const eventHash = log.data.eventHash;
+        const existingIndex = eventHashMap.get(eventHash);
+        
+        if (existingIndex !== undefined && logs.value[existingIndex]) {
+          // 已存在相同事件，增加计数
+          logs.value[existingIndex].count = (logs.value[existingIndex].count || 1) + 1;
+          logs.value[existingIndex].timestamp = log.timestamp; // 更新最后调用时间
+        } else {
+          // 新事件，添加到列表
+          const newLog: Log = {
+            ...log,
+            count: 1,
+            eventHash,
+          };
+          logs.value.unshift(newLog);
+          // 更新 hash 映射（索引会因为 unshift 而改变，需要重建）
+          rebuildHashMap();
+        }
       } else {
         logs.value.unshift(log);
       }
@@ -54,6 +125,7 @@ const connectWebSocket = () => {
       // 限制日志数量
       if (logs.value.length > 1000) {
         logs.value = logs.value.slice(0, 1000);
+        rebuildHashMap(); // 重建索引
       }
     } catch (error) {
       console.error('解析 WebSocket 消息错误:', error);
@@ -100,7 +172,80 @@ const stopMonitoring = () => {
 
 const clearLogs = () => {
   logs.value = [];
+  eventHashMap.clear();
 };
+
+// 重建 eventHash 索引映射
+function rebuildHashMap() {
+  eventHashMap.clear();
+  logs.value.forEach((log, index) => {
+    if (log.eventHash) {
+      eventHashMap.set(log.eventHash, index);
+    }
+  });
+}
+
+function getLogClass(log: Log): string {
+  if (log.type === 'FINGERPRINT_EVENT' && log.data?.category) {
+    return `log-fingerprint log-fingerprint-${log.data.category}`;
+  }
+  return `log-${log.type.toLowerCase()}`;
+}
+
+function hasOtherDetails(detail: any): boolean {
+  if (!detail) return false;
+  const excludeKeys = ['input', 'output', 'snapshot', 'duration', 'width', 'height'];
+  return Object.keys(detail).some(key => !excludeKeys.includes(key));
+}
+
+function getOtherDetails(detail: any): any {
+  if (!detail) return {};
+  const excludeKeys = ['input', 'output', 'snapshot', 'duration', 'width', 'height'];
+  const result: any = {};
+  Object.keys(detail).forEach(key => {
+    if (!excludeKeys.includes(key)) {
+      result[key] = detail[key];
+    }
+  });
+  return result;
+}
+
+function formatDataSize(dataUrl: string): string {
+  const bytes = new Blob([dataUrl]).size;
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+function getImageFormat(dataUrl: string): string {
+  if (!dataUrl) return 'Unknown';
+  const match = dataUrl.match(/^data:image\/(\w+);base64,/);
+  return match && match[1] ? match[1].toUpperCase() : 'Unknown';
+}
+
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    alert('已复制到剪贴板');
+  } catch (err) {
+    console.error('复制失败:', err);
+    alert('复制失败');
+  }
+}
+
+function openImagePreview(dataUrl: string) {
+  const win = window.open('', '_blank');
+  if (win) {
+    win.document.write(`
+      <html>
+        <head><title>Canvas 快照预览</title></head>
+        <body style="margin:0;display:flex;align-items:center;justify-content:center;background:#000;">
+          <img src="${dataUrl}" style="max-width:100%;max-height:100vh;"/>
+        </body>
+      </html>
+    `);
+  }
+}
 
 onMounted(() => {
   connectWebSocket();
@@ -167,18 +312,101 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <div class="category-filter">
+      <button
+        v-for="(count, cat) in categories"
+        :key="cat"
+        class="category-btn"
+        :class="{ active: selectedCategory === cat }"
+        @click="selectedCategory = cat"
+      >
+        <span class="category-icon">{{ getCategoryIcon(cat) }}</span>
+        <span class="category-name">{{ cat === 'all' ? '全部' : cat }}</span>
+        <span class="category-count">{{ count }}</span>
+      </button>
+    </div>
+
     <div class="logs-container">
-      <div v-if="logs.length === 0" class="empty-state">
+      <div v-if="filteredLogs.length === 0" class="empty-state">
         <p>暂无日志记录</p>
         <p class="hint">输入URL并点击"开始监控"按钮开始监控网页行为</p>
       </div>
       
-      <div v-for="(log, index) in logs" :key="index" class="log-entry" :class="`log-${log.type.toLowerCase()}`">
+      <div v-for="(log, index) in filteredLogs" :key="index" class="log-entry" :class="getLogClass(log)">
         <div class="log-header">
-          <span class="log-type">{{ log.type }}</span>
+          <span class="log-type-badge">
+            <span v-if="log.type === 'FINGERPRINT_EVENT' && log.data?.category" class="category-badge">
+              {{ getCategoryIcon(log.data.category) }} {{ log.data.category }}
+            </span>
+            <span v-else>{{ log.type }}</span>
+          </span>
           <span class="log-timestamp">{{ new Date(log.timestamp).toLocaleTimeString() }}</span>
         </div>
-        <pre class="log-data">{{ JSON.stringify(log.data, null, 2) }}</pre>
+
+        <div v-if="log.type === 'FINGERPRINT_EVENT'" class="fingerprint-detail">
+          <div class="api-info">
+            <strong>API:</strong> {{ log.data.api }}
+            <span v-if="log.count && log.count > 1" class="call-count-badge">
+              调用 {{ log.count }} 次
+            </span>
+            <span v-if="log.data.detail?.duration" class="duration-badge">
+              {{ log.data.detail.duration.toFixed(2) }}ms
+            </span>
+          </div>
+          <div v-if="log.data.url" class="url-info">
+            <strong>URL:</strong> <span class="url-text">{{ log.data.url }}</span>
+          </div>
+
+          <!-- 输入参数 -->
+          <details v-if="log.data.detail?.input" class="param-section" open>
+            <summary>📥 输入参数</summary>
+            <pre class="param-data">{{ JSON.stringify(log.data.detail.input, null, 2) }}</pre>
+          </details>
+
+          <!-- 输出结果 -->
+          <details v-if="log.data.detail?.output" class="param-section" open>
+            <summary>📤 输出结果</summary>
+            <pre class="param-data">{{ JSON.stringify(log.data.detail.output, null, 2) }}</pre>
+          </details>
+
+          <!-- Canvas 快照 -->
+          <div v-if="log.data.detail?.snapshot" class="snapshot-container">
+            <div class="snapshot-header">
+              <div class="snapshot-label">📸 Canvas 快照</div>
+              <div class="snapshot-info">
+                <span v-if="log.data.detail?.width">{{ log.data.detail.width }}x{{ log.data.detail.height }}</span>
+              </div>
+            </div>
+            <img :src="log.data.detail.snapshot" alt="Canvas Snapshot" class="canvas-snapshot" @click="openImagePreview(log.data.detail.snapshot)" />
+            
+            <!-- 原始数据预览 -->
+            <details class="snapshot-raw-data">
+              <summary>🔍 原始 Base64 数据</summary>
+              <div class="raw-data-preview">
+                <div class="data-stats">
+                  <span>大小: {{ formatDataSize(log.data.detail.snapshot) }}</span>
+                  <span>格式: {{ getImageFormat(log.data.detail.snapshot) }}</span>
+                </div>
+                <textarea class="raw-data-text" :value="log.data.detail.snapshot" readonly></textarea>
+                <button class="copy-btn" @click="copyToClipboard(log.data.detail.snapshot)">📋 复制</button>
+              </div>
+            </details>
+          </div>
+
+          <!-- 其他详情 -->
+          <details v-if="hasOtherDetails(log.data.detail)" class="param-section">
+            <summary>ℹ️ 其他详情</summary>
+            <pre class="param-data">{{ JSON.stringify(getOtherDetails(log.data.detail), null, 2) }}</pre>
+          </details>
+
+          <!-- 调用栈 -->
+          <details v-if="log.data.stack" class="stack-trace">
+            <summary>📚 调用栈</summary>
+            <pre class="stack-content">{{ log.data.stack }}</pre>
+          </details>
+        </div>
+
+        <pre v-else class="log-data">{{ JSON.stringify(log.data, null, 2) }}</pre>
       </div>
     </div>
   </div>
@@ -349,11 +577,68 @@ onUnmounted(() => {
   animation: pulse 2s infinite;
 }
 
+.category-filter {
+  background: white;
+  padding: 15px 20px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.category-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  background: white;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-size: 14px;
+}
+
+.category-btn:hover {
+  border-color: #667eea;
+  background: #f8f9ff;
+  transform: translateY(-2px);
+}
+
+.category-btn.active {
+  border-color: #667eea;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  font-weight: 600;
+}
+
+.category-icon {
+  font-size: 18px;
+}
+
+.category-name {
+  text-transform: capitalize;
+}
+
+.category-count {
+  background: rgba(0, 0, 0, 0.1);
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.category-btn.active .category-count {
+  background: rgba(255, 255, 255, 0.3);
+}
+
 .logs-container {
   background: white;
   border-radius: 12px;
   padding: 20px;
-  height: calc(100vh - 380px);
+  height: calc(100vh - 480px);
   overflow-y: auto;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
@@ -406,6 +691,22 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
+.log-type-badge {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-block;
+}
+
+.category-badge {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 4px 10px;
+  border-radius: 6px;
+  text-transform: capitalize;
+}
+
 .log-type {
   padding: 2px 8px;
   border-radius: 4px;
@@ -419,6 +720,233 @@ onUnmounted(() => {
   color: #999;
   font-size: 12px;
   font-weight: normal;
+}
+
+.fingerprint-detail {
+  margin-top: 12px;
+}
+
+.api-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.call-count-badge {
+  background: #ff6b6b;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  animation: pulse 1s ease-in-out;
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.duration-badge {
+  background: #4caf50;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.url-info {
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.url-text {
+  color: #667eea;
+  word-break: break-all;
+}
+
+.param-section {
+  margin: 12px 0;
+  background: #f8f9fa;
+  border-radius: 6px;
+  padding: 10px;
+  border: 1px solid #e0e0e0;
+}
+
+.param-section summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #555;
+  user-select: none;
+  padding: 4px;
+  font-size: 13px;
+}
+
+.param-section summary:hover {
+  color: #667eea;
+}
+
+.param-data {
+  margin: 8px 0 0 0;
+  padding: 10px;
+  background: white;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Courier New', monospace;
+  overflow-x: auto;
+  color: #333;
+  line-height: 1.5;
+}
+
+.snapshot-container {
+  margin: 15px 0;
+  padding: 15px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  border: 2px solid #e0e0e0;
+}
+
+.snapshot-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.snapshot-label {
+  font-weight: 600;
+  color: #333;
+  font-size: 14px;
+}
+
+.snapshot-info {
+  font-size: 12px;
+  color: #666;
+  font-family: 'Courier New', monospace;
+}
+
+.canvas-snapshot {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  border: 1px solid #ddd;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  cursor: zoom-in;
+  transition: transform 0.3s;
+  display: block;
+  margin-bottom: 10px;
+}
+
+.canvas-snapshot:hover {
+  transform: scale(1.02);
+}
+
+.snapshot-raw-data {
+  margin-top: 10px;
+  background: white;
+  border-radius: 6px;
+  padding: 8px;
+  border: 1px solid #e0e0e0;
+}
+
+.snapshot-raw-data summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #555;
+  user-select: none;
+  padding: 4px;
+  font-size: 12px;
+}
+
+.snapshot-raw-data summary:hover {
+  color: #667eea;
+}
+
+.raw-data-preview {
+  margin-top: 8px;
+}
+
+.data-stats {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #666;
+}
+
+.data-stats span {
+  background: #e8f5e9;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.raw-data-text {
+  width: 100%;
+  min-height: 80px;
+  max-height: 200px;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  resize: vertical;
+  background: #fafafa;
+}
+
+.copy-btn {
+  margin-top: 8px;
+  padding: 6px 12px;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.3s;
+}
+
+.copy-btn:hover {
+  background: #5568d3;
+}
+
+.stack-trace {
+  margin-top: 12px;
+  background: #f5f5f5;
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.stack-trace summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #555;
+  user-select: none;
+  padding: 4px;
+}
+
+.stack-trace summary:hover {
+  color: #667eea;
+}
+
+.stack-content {
+  margin-top: 8px;
+  padding: 10px;
+  background: white;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Courier New', monospace;
+  overflow-x: auto;
+  color: #666;
 }
 
 .log-data {
@@ -457,6 +985,26 @@ onUnmounted(() => {
 
 .log-error { background-color: #ffebee; border-left: 4px solid #d32f2f; }
 .log-error .log-type { background-color: #d32f2f; color: white; }
+
+.log-fingerprint { background-color: #e0f7fa; border-left: 4px solid #00bcd4; }
+.log-fingerprint .log-type { background-color: #00bcd4; color: white; }
+
+.log-fingerprint_error { background-color: #fff8e1; border-left: 4px solid #ffb300; }
+.log-fingerprint_error .log-type { background-color: #ffb300; color: white; }
+
+.log-fingerprint_event { background-color: #e0f2f1; border-left: 4px solid #26a69a; }
+.log-fingerprint_event .log-type { background-color: #26a69a; color: white; }
+
+.log-fingerprint-canvas { background-color: #fff3e0; border-left: 4px solid #ff9800; }
+.log-fingerprint-webgl { background-color: #e1f5fe; border-left: 4px solid #03a9f4; }
+.log-fingerprint-font { background-color: #f3e5f5; border-left: 4px solid #9c27b0; }
+.log-fingerprint-webrtc { background-color: #e8f5e9; border-left: 4px solid #4caf50; }
+.log-fingerprint-audio { background-color: #fce4ec; border-left: 4px solid #e91e63; }
+.log-fingerprint-screen { background-color: #e0f2f1; border-left: 4px solid #009688; }
+.log-fingerprint-navigator { background-color: #fff9c4; border-left: 4px solid #fbc02d; }
+.log-fingerprint-media { background-color: #ede7f6; border-left: 4px solid #673ab7; }
+.log-fingerprint-battery { background-color: #e8eaf6; border-left: 4px solid #3f51b5; }
+.log-fingerprint-performance { background-color: #ffebee; border-left: 4px solid #f44336; }
 
 /* 滚动条样式 */
 .logs-container::-webkit-scrollbar {

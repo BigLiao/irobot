@@ -3,12 +3,16 @@
 // Puppeteer 启动器和注入器
 
 import puppeteer, { Browser, Page } from 'puppeteer';
-import fs from 'fs';
+import fs, { mkdtempSync } from 'fs';
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const tmpUserDir = mkdtempSync(path.join(os.tmpdir(), 'puppeteer_profile_'));
+
 
 // 从命令行参数获取URL
 const targetUrl = process.argv[2] || 'https://www.baidu.com';
@@ -42,6 +46,7 @@ async function main() {
     
     browser = await puppeteer.launch({
       headless: false,
+      userDataDir: tmpUserDir,
       defaultViewport: {
         width: 1280,
         height: 720,
@@ -100,6 +105,7 @@ async function main() {
 
   } catch (error) {
     console.error('\n❌ 发生错误:', error);
+    fs.rmSync(tmpUserDir, { recursive: true });
     process.exit(1);
   }
 }
@@ -107,16 +113,19 @@ async function main() {
 // 优雅关闭
 process.on('SIGINT', async () => {
   console.log('\n\n🛑 收到停止信号，正在关闭...');
+  fs.rmSync(tmpUserDir, { recursive: true });
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('\n\n🛑 收到终止信号，正在关闭...');
+  fs.rmSync(tmpUserDir, { recursive: true });
   process.exit(0);
 });
 
 // 启动
 main().catch((error) => {
   console.error('❌ 启动失败:', error);
+  fs.rmSync(tmpUserDir, { recursive: true });
   process.exit(1);
 });
