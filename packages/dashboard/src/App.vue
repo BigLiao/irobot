@@ -33,6 +33,62 @@ const showRuleEditor = ref(false);
 const availableScripts = ref<string[]>([]);
 const selectedScript = ref<string>('');
 
+// URL历史记录 - 最多保存5个
+const urlHistory = ref<string[]>([]);
+const HISTORY_KEY = 'irobot_url_history';
+const MAX_HISTORY = 5;
+
+// 从localStorage加载历史记录
+function loadUrlHistory() {
+  try {
+    const saved = localStorage.getItem(HISTORY_KEY);
+    if (saved) {
+      urlHistory.value = JSON.parse(saved);
+    }
+  } catch (error) {
+    console.error('加载URL历史失败:', error);
+    urlHistory.value = [];
+  }
+}
+
+// 保存URL到历史记录
+function saveUrlToHistory(url: string) {
+  if (!url || !url.trim()) return;
+  
+  // 移除已存在的相同URL
+  urlHistory.value = urlHistory.value.filter(u => u !== url);
+  
+  // 添加到开头
+  urlHistory.value.unshift(url);
+  
+  // 限制数量
+  if (urlHistory.value.length > MAX_HISTORY) {
+    urlHistory.value = urlHistory.value.slice(0, MAX_HISTORY);
+  }
+  
+  // 保存到localStorage
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(urlHistory.value));
+  } catch (error) {
+    console.error('保存URL历史失败:', error);
+  }
+}
+
+// 快速填充URL
+function fillUrl(url: string) {
+  targetUrl.value = url;
+}
+
+// 删除历史记录
+function removeFromHistory(url: string) {
+  urlHistory.value = urlHistory.value.filter(u => u !== url);
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(urlHistory.value));
+  } catch (error) {
+    console.error('删除URL历史失败:', error);
+  }
+}
+
 const categories = computed(() => {
   const categoryCount: Record<string, number> = {
     all: logs.value.length,
@@ -177,6 +233,9 @@ const connectWebSocket = () => {
 
 const startMonitoring = () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
+    // 保存URL到历史记录
+    saveUrlToHistory(targetUrl.value);
+    
     ws.send(JSON.stringify({
       type: 'START_MONITOR',
       url: targetUrl.value,
@@ -365,6 +424,7 @@ async function fetchAvailableScripts() {
 
 onMounted(() => {
   connectWebSocket();
+  loadUrlHistory(); // 加载URL历史记录
   // 从localStorage恢复修改规则
   const savedRules = localStorage.getItem('irobot_mock_rules');
   if (savedRules) {
@@ -415,6 +475,28 @@ onUnmounted(() => {
           :disabled="isMonitoring"
           @keyup.enter="startMonitoring"
         />
+        
+        <!-- URL历史记录快捷按钮 -->
+        <div v-if="urlHistory.length > 0" class="url-history">
+          <div class="history-label">历史记录：</div>
+          <div class="history-buttons">
+            <button 
+              v-for="(url, index) in urlHistory" 
+              :key="index"
+              class="history-btn"
+              @click="fillUrl(url)"
+              :title="url"
+              :disabled="isMonitoring"
+            >
+              <span class="history-url">{{ url }}</span>
+              <span 
+                class="history-remove" 
+                @click.stop="removeFromHistory(url)"
+                title="删除"
+              >×</span>
+            </button>
+          </div>
+        </div>
       </div>
 
       <div class="input-group">
@@ -762,6 +844,86 @@ onUnmounted(() => {
 .input-group input:disabled {
   background-color: #f5f5f5;
   cursor: not-allowed;
+}
+
+/* URL历史记录样式 */
+.url-history {
+  margin-top: 12px;
+  padding: 12px;
+  background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+  border-radius: 8px;
+  border: 1px solid #dee2e6;
+}
+
+.history-label {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.history-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.history-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  background: white;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.history-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border-color: #667eea;
+  transform: translateY(-2px);
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+}
+
+.history-btn:hover:not(:disabled) .history-remove {
+  color: white;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.history-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.history-url {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+  text-align: left;
+}
+
+.history-remove {
+  margin-left: 8px;
+  padding: 0 6px;
+  background: #e9ecef;
+  border-radius: 3px;
+  font-size: 16px;
+  font-weight: bold;
+  color: #6c757d;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.history-remove:hover {
+  background: #dc3545;
+  color: white;
 }
 
 .script-select {
