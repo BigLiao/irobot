@@ -1,3 +1,4 @@
 {
-    "test.js": "test-override.js"
+    "test.js": "test-override.js",
+    "https://lf-douyin-pc-web.douyinstatic.com/obj/passport-fe/ucenter_fe/@byted/uc-secure-dtrait-core/1.0.31/dist/index.umd.production.js": "dtrait.umd.production-override.js"
 }
