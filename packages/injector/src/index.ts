@@ -135,8 +135,6 @@ async function main() {
       const url = request.url();
       let matched = false;
 
-      console.log(`📡 请求: ${url}`);
-
       // 检查是否有匹配的 override 规则
       for (const [targetUrl, localFile] of Object.entries(overrideConfig)) {
         // 简单的包含匹配，后续可以扩展为正则

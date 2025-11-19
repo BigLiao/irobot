@@ -9422,7 +9422,7 @@
   const OriginalConstructor = window.DTraitSDK.default;
   const className = "DTraitSDK.default";
 
-  console.log(`✅ 开始 Hook ${className}...`);
+    console.log(`✅ 开始 Hook ${className}...`);
 
   // 3. 创建构造函数的代理 (Proxy)
   const HookedConstructor = new Proxy(OriginalConstructor, {
@@ -9483,7 +9483,11 @@
   });
 
   // 5. 用 Hook 后的构造函数覆盖全局变量
-  window.DTraitSDK.default = HookedConstructor;
+    window.DTraitSDK.default = HookedConstructor;
+    
+    window.DTraitSDK.default.getInstance = (...args) => {
+        return new HookedConstructor(...args);
+    };
 
 })();
 
