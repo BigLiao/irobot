@@ -48,3 +48,5 @@ coverage/
 
 # OS
 Thumbs.db
+
+temp/

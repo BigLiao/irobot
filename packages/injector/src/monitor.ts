@@ -374,11 +374,7 @@ function hookFontApis() {
           // 当检测到频繁的字体测量时上报（可能是指纹采集）
           // 规则：10 次调用内有 3+ 次字体变化，或总调用次数 > 50
           const now = Date.now();
-          const shouldReport = (
-            (measureTextCallCount % 10 === 0 && fontChangeCount >= 3) ||
-            (measureTextCallCount === 50) ||
-            (measureTextCallCount % 100 === 0)
-          );
+          const shouldReport = true;
           
           if (shouldReport && now - lastReportTime > 1000) {
             reportFingerprintEvent('font', 'measureText', {
