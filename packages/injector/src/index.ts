@@ -74,7 +74,7 @@ async function main() {
 
   try {
     console.log('\n🚀 正在启动 Chromium 浏览器...');
-    
+
     browser = await puppeteer.launch({
       headless: false,
       userDataDir: tmpUserDir,
@@ -98,7 +98,7 @@ async function main() {
     page.on('console', (msg) => {
       const type = msg.type();
       const text = msg.text();
-      
+
       if (type === 'error') {
         console.log(`❌ 页面控制台 [${type}]:`, text);
       } else if (text.includes('[Injector]')) {
@@ -107,12 +107,66 @@ async function main() {
     });
 
     // 监听页面错误
-    page.on('pageerror', (error) => {
+    page.on('pageerror', (error: any) => {
       console.error('❌ 页面错误:', error.message);
     });
 
     console.log(`\n🌐 正在访问: ${targetUrl}`);
-    
+
+
+
+    // 读取 override 配置
+    const overrideConfigPath = path.join(__dirname, '../override/config.json');
+    let overrideConfig: Record<string, string> = {};
+    try {
+      if (fs.existsSync(overrideConfigPath)) {
+        const configContent = fs.readFileSync(overrideConfigPath, 'utf-8');
+        overrideConfig = JSON.parse(configContent);
+        console.log(`✅ 加载 Override 配置: ${Object.keys(overrideConfig).length} 条规则`);
+      }
+    } catch (error) {
+      console.error('❌ 加载 Override 配置失败:', error);
+    }
+
+    // 启用请求拦截
+    await page.setRequestInterception(true);
+
+    page.on('request', async (request) => {
+      const url = request.url();
+      let matched = false;
+
+      console.log(`📡 请求: ${url}`);
+
+      // 检查是否有匹配的 override 规则
+      for (const [targetUrl, localFile] of Object.entries(overrideConfig)) {
+        // 简单的包含匹配，后续可以扩展为正则
+        if (url.includes(targetUrl)) {
+          const localFilePath = path.join(__dirname, '../override', localFile);
+          if (fs.existsSync(localFilePath)) {
+            try {
+              const content = fs.readFileSync(localFilePath, 'utf-8');
+              console.log(`🔄 Override: ${url} -> ${localFile}`);
+              await request.respond({
+                status: 200,
+                contentType: 'application/javascript',
+                body: content,
+              });
+              matched = true;
+              break;
+            } catch (error) {
+              console.error(`❌ 读取 Override 文件失败: ${localFilePath}`, error);
+            }
+          } else {
+            console.warn(`⚠️ Override 文件不存在: ${localFilePath}`);
+          }
+        }
+      }
+
+      if (!matched) {
+        request.continue();
+      }
+    });
+
     await page.goto(targetUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 30000,
@@ -121,7 +175,7 @@ async function main() {
     console.log('✅ 页面加载完成');
 
     console.log('\n💉 正在注入监控脚本...');
-    
+
     // 注入脚本到页面
     await page.evaluateOnNewDocument(injectorScript);
     await page.evaluate(injectorScript);
@@ -144,7 +198,7 @@ async function main() {
     console.log('💡 提示: 按 Ctrl+C 停止监控并关闭浏览器\n');
 
     // 保持进程运行
-    await new Promise(() => {});
+    await new Promise(() => { });
 
   } catch (error) {
     console.error('\n❌ 发生错误:', error);

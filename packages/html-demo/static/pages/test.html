@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HTML Demo Sandbox</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        margin: 0;
+        padding: 2rem;
+        background: #0c111d;
+        color: #f5f6fa;
+      }
+      main {
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 2rem;
+        background: #1c2333;
+        border-radius: 12px;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+      }
+      button {
+        border: none;
+        background: #3b82f6;
+        color: #fff;
+        padding: 0.75rem 1.5rem;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+      button:hover { background: #2563eb; }
+      pre {
+        margin-top: 1.5rem;
+        padding: 1rem;
+        border-radius: 8px;
+        background: #111827;
+        min-height: 140px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>HTML Demo Sandbox</h1>
+      <p>点击下方按钮发送一个 XMLHttpRequest 请求到 <code>/api/test</code>。</p>
+      <button id="xhrButton">发送 XHR</button>
+      <pre id="responseLog">等待操作…</pre>
+    </main>
+    <script src="./dtrait.umd.production.js"></script>
+    <script src="./test.js" type="module"></script>
+  </body>
+</html>
