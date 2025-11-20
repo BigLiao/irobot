@@ -44,6 +44,11 @@ const pendingMessages: string[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 
+// 在非常早期记录基础全局变量集合，用于后续只关注页面新增的全局变量
+const BASELINE_GLOBAL_KEYS = new Set<string>(
+  typeof window !== 'undefined' ? Object.getOwnPropertyNames(window) : []
+);
+
 // 存储修改规则 - 从注入时的初始规则开始
 let mockRules: MockRule[] = MOCK_RULES_PLACEHOLDER as any;
 
@@ -123,6 +128,20 @@ function getWebSocket(wsUrl: string) {
         if (mockRules.length > 0) {
           console.log('[Injector] 当前修改规则:', mockRules.map(r => `${r.match.api}${r.enabled ? '' : ' (已禁用)'}`).join(', '));
         }
+      } else if (data.type === 'RUN_VAR_PATROL') {
+        console.log('[Injector] 收到变量纠察指令，3 秒后采集快照');
+        setTimeout(() => {
+          try {
+            const snapshot = collectVariableSnapshot();
+            sendMessage('VAR_PATROL_SNAPSHOT', snapshot);
+            console.log('[Injector] 变量纠察快照已上报');
+          } catch (e) {
+            console.error('[Injector] 变量纠察失败:', e);
+            sendMessage('VAR_PATROL_ERROR', {
+              message: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }, 3000);
       }
     } catch (error) {
       console.error('[Injector] 解析消息错误:', error);
@@ -193,6 +212,132 @@ function setupNodeBridge() {
   } catch (e) {
     console.warn('[Injector] 安装 Node Bridge 失败:', e);
   }
+}
+
+// 采集 变量/存储 快照
+function collectVariableSnapshot() {
+  const now = Date.now();
+  const url = window.location.href;
+
+  // cookies
+  const cookieStr = document.cookie || '';
+  const cookies: Record<string, string> = {};
+  try {
+    cookieStr.split(';').forEach((part) => {
+      const t = part.trim();
+      if (!t) return;
+      const eq = t.indexOf('=');
+      const k = eq >= 0 ? t.slice(0, eq) : t;
+      const v = eq >= 0 ? t.slice(eq + 1) : '';
+      if (k) cookies[k] = v;
+    });
+  } catch {}
+
+  // storages
+  const snapshotStorage = (s: Storage) => {
+    const o: Record<string, string> = {};
+    try {
+      for (let i = 0; i < s.length; i++) {
+        const key = s.key(i);
+        if (key) o[key] = s.getItem(key) ?? '';
+      }
+    } catch {}
+    return o;
+  };
+  const local = snapshotStorage(localStorage);
+  const session = snapshotStorage(sessionStorage);
+
+  // globals 扁平化（仅页面新增；过滤函数；对象进行深度扁平化，限制深度/数量）
+  const globalsFlat: Record<string, string | number | boolean | null> = {};
+  const currentKeys = Object.getOwnPropertyNames(window);
+  const visited = new WeakSet<object>();
+  const MAX_DEPTH = 3;
+  let flatCount = 0;
+  const MAX_FLAT_COUNT = 500; // 防止爆炸
+
+  const isPlainObject = (obj: any) => {
+    if (obj === null) return false;
+    const proto = Object.getPrototypeOf(obj);
+    return proto === Object.prototype || proto === null;
+  };
+
+  const flatten = (value: any, base: string, depth: number) => {
+    if (flatCount >= MAX_FLAT_COUNT) return;
+    const t = typeof value;
+    if (t === 'function') return; // 过滤函数
+    if (value === null) {
+      globalsFlat[base] = null;
+      flatCount++;
+      return;
+    }
+    if (t === 'string' || t === 'number' || t === 'boolean') {
+      globalsFlat[base] = value;
+      flatCount++;
+      return;
+    }
+    if (t !== 'object') {
+      return; // symbol/undefined 跳过
+    }
+    // 深度控制
+    if (depth >= MAX_DEPTH) return;
+    // 避免循环
+    if (visited.has(value)) return;
+    visited.add(value);
+
+    // 只处理普通对象或数组
+    if (Array.isArray(value)) {
+      const len = Math.min(value.length, 50);
+      for (let i = 0; i < len; i++) {
+        if (flatCount >= MAX_FLAT_COUNT) break;
+        try {
+          flatten(value[i], `${base}.${i}`, depth + 1);
+        } catch {}
+      }
+      return;
+    }
+
+    if (!isPlainObject(value)) {
+      // 对 Date/RegExp 等特殊对象做字符串化
+      try {
+        const tag = Object.prototype.toString.call(value);
+        if (tag === '[object Date]') {
+          globalsFlat[base] = (value as Date).toISOString() as any;
+          flatCount++;
+        }
+      } catch {}
+      return;
+    }
+
+    const keys = Object.keys(value).slice(0, 50);
+    for (const k of keys) {
+      if (flatCount >= MAX_FLAT_COUNT) break;
+      try {
+        const v = value[k];
+        flatten(v, `${base}.${k}`, depth + 1);
+      } catch {}
+    }
+  };
+
+  for (const name of currentKeys) {
+    if (BASELINE_GLOBAL_KEYS.has(name)) continue;
+    try {
+      const v = (window as any)[name];
+      if (typeof v === 'function') continue; // 全局变量过滤函数
+      flatten(v, name, 0);
+    } catch {
+      // ignore errors from getters
+    }
+  }
+
+  return {
+    url,
+    timestamp: now,
+    userAgent: navigator.userAgent,
+    cookies,
+    localStorage: local,
+    sessionStorage: session,
+    globalsFlat,
+  };
 }
 
 function reportFingerprintEvent(category: FingerprintCategory, api: string, detail?: Record<string, any>) {

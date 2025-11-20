@@ -23,12 +23,13 @@ interface MockRule {
 }
 
 const logs = ref<Log[]>([]);
+const searchQuery = ref('');
 const eventHashMap = new Map<string, number>(); // eventHash -> logs数组索引
 const targetUrl = ref('https://www.baidu.com');
 const isMonitoring = ref(false);
 const wsConnected = ref(false);
 const selectedCategory = ref<string>('all');
-const activeTab = ref<'intercept' | 'mock' | 'cookie'>('intercept');
+const activeTab = ref<'intercept' | 'mock' | 'cookie' | 'varpatrol'>('intercept');
 const mockRules = ref<MockRule[]>([]);
 const editingRule = ref<MockRule | null>(null);
 const showRuleEditor = ref(false);
@@ -107,12 +108,14 @@ const categories = computed(() => {
 });
 
 const filteredLogs = computed(() => {
-  if (selectedCategory.value === 'all') {
-    return logs.value;
-  }
-  return logs.value.filter(
-    (log) => log.type === 'FINGERPRINT_EVENT' && log.data?.category === selectedCategory.value
-  );
+  const base = selectedCategory.value === 'all'
+    ? logs.value
+    : logs.value.filter(
+        (log) => log.type === 'FINGERPRINT_EVENT' && log.data?.category === selectedCategory.value
+      );
+  const q = searchQuery.value.trim();
+  if (!q) return base;
+  return base.filter((log) => matchesSearch(log, q));
 });
 
 function getCategoryIcon(category: string): string {
@@ -235,6 +238,24 @@ const connectWebSocket = () => {
       } else {
         logs.value.unshift(log);
       }
+
+      // 变量纠察消息处理（不进入通用日志区，仅更新状态）
+      if (log.type === 'VAR_PATROL_STARTED') {
+        varPatrolRunning.value = true;
+        varPatrolResult.value = null;
+        console.log('dashboard 🧪 变量纠察开始:', log);
+      } else if (log.type === 'VAR_PATROL_RESULT') {
+        varPatrolRunning.value = false;
+        console.log('dashboard 🧪 变量纠察结果:', log);
+        varPatrolResult.value = {
+          url: log.url,
+          first: log.first,
+          second: log.second,
+          result: log.result,
+        };
+        // 自动切换到变量纠察 tab 展示结果
+        activeTab.value = 'varpatrol';
+      }
       
       // 限制日志数量
       if (logs.value.length > 1000) {
@@ -287,6 +308,94 @@ const stopMonitoring = () => {
     }));
   }
 };
+
+// 变量纠察
+const varPatrolRunning = ref(false);
+const varPatrolResult = ref<any | null>(null);
+
+const startVarPatrol = () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    alert('WebSocket 未连接');
+    return;
+  }
+  // 保存URL到历史
+  saveUrlToHistory(targetUrl.value);
+  varPatrolRunning.value = true;
+  varPatrolResult.value = null;
+  ws.send(JSON.stringify({ type: 'RUN_VAR_PATROL', url: targetUrl.value }));
+};
+
+// mock 规则过滤
+const filteredMockRules = computed(() => {
+  const q = searchQuery.value.trim();
+  if (!q) return mockRules.value;
+  return mockRules.value.filter((r) => {
+    if (r.id?.toLowerCase().includes(q.toLowerCase())) return true;
+    if (r.match?.api?.toLowerCase().includes(q.toLowerCase())) return true;
+    try {
+      const s = typeof r.response === 'string' ? r.response : JSON.stringify(r.response);
+      if (s && s.toLowerCase().includes(q.toLowerCase())) return true;
+    } catch {}
+    return false;
+  });
+});
+
+// 变量纠察结果过滤
+const filteredVarPatrolResult = computed(() => {
+  const res = varPatrolResult.value;
+  if (!res) return null;
+  const q = searchQuery.value.trim().toLowerCase();
+  const filterKV = (items: { key: string; value: any }[]) => {
+    if (!q) return items;
+    return items.filter((it) =>
+      (it.key && String(it.key).toLowerCase().includes(q)) ||
+      (it.value !== undefined && String(it.value).toLowerCase().includes(q))
+    );
+  };
+  return {
+    url: res.url,
+    result: {
+      cookies: filterKV(res.result.cookies || []),
+      localStorage: filterKV(res.result.localStorage || []),
+      sessionStorage: filterKV(res.result.sessionStorage || []),
+      globals: filterKV(res.result.globals || []),
+    },
+  };
+});
+
+// 搜索匹配（递归，跳过快照等大字段）
+function matchesSearch(input: any, query: string, depth = 0, visited = new Set<any>()): boolean {
+  if (!query) return true;
+  if (input == null) return false;
+  if (depth > 5) return false;
+
+  const q = query.toLowerCase();
+  const t = typeof input;
+  if (t === 'string' || t === 'number' || t === 'boolean') {
+    return String(input).toLowerCase().includes(q);
+  }
+  if (t !== 'object') return false;
+  if (visited.has(input)) return false;
+  visited.add(input);
+
+  if (Array.isArray(input)) {
+    for (const v of input) {
+      if (matchesSearch(v, query, depth + 1, visited)) return true;
+    }
+    return false;
+  }
+
+  for (const k of Object.keys(input)) {
+    if (k === 'snapshot') continue; // 避免大图数据带来的卡顿
+    try {
+      const v = (input as any)[k];
+      // 允许在键名中匹配
+      if (k.toLowerCase().includes(q)) return true;
+      if (matchesSearch(v, query, depth + 1, visited)) return true;
+    } catch {}
+  }
+  return false;
+}
 
 const clearLogs = () => {
   logs.value = [];
@@ -488,11 +597,14 @@ onUnmounted(() => {
 });
 // ============= Cookie 模块 =============
 const cookieLogs = computed(() => {
-  return logs.value.filter(
+  const list = logs.value.filter(
     (log) =>
       (log.type === 'FINGERPRINT_EVENT' && log.data?.category === 'cookie') ||
       (log.type === 'HTTP_SET_COOKIE')
   );
+  const q = searchQuery.value.trim();
+  if (!q) return list;
+  return list.filter((log) => matchesSearch(log, q));
 });
 
 function getCookieDiff(currentLog: Log, index: number) {
@@ -585,14 +697,14 @@ function getCookieDiff(currentLog: Log, index: number) {
         </select>
       </div>
       
-      <div class="button-group">
-        <button 
-          class="btn btn-primary" 
-          @click="startMonitoring" 
-          :disabled="!wsConnected || isMonitoring || !targetUrl"
-        >
-          {{ isMonitoring ? '监控中...' : '开始监控' }}
-        </button>
+    <div class="button-group">
+      <button 
+        class="btn btn-primary" 
+        @click="startMonitoring" 
+        :disabled="!wsConnected || isMonitoring || !targetUrl"
+      >
+        {{ isMonitoring ? '监控中...' : '开始监控' }}
+      </button>
         
         <button 
           class="btn btn-danger" 
@@ -602,13 +714,22 @@ function getCookieDiff(currentLog: Log, index: number) {
           停止监控
         </button>
         
-        <button 
-          class="btn btn-secondary" 
-          @click="clearLogs"
-        >
-          清空日志
-        </button>
-      </div>
+      <button 
+        class="btn btn-secondary" 
+        @click="clearLogs"
+      >
+        清空日志
+      </button>
+      
+      <button
+        class="btn btn-warning"
+        @click="startVarPatrol"
+        :disabled="!wsConnected || varPatrolRunning || !targetUrl"
+        title="启动两轮对比以发现稳定变量"
+      >
+        {{ varPatrolRunning ? '变量纠察中...' : '🧪 变量纠察' }}
+      </button>
+    </div>
       
       <div class="stats">
         <span>日志数量: {{ logs.length }}</span>
@@ -638,6 +759,24 @@ function getCookieDiff(currentLog: Log, index: number) {
       >
         🍪 Cookies
       </button>
+      <button 
+        class="tab-btn" 
+        :class="{ active: activeTab === 'varpatrol' }"
+        @click="activeTab = 'varpatrol'"
+      >
+        🧪 变量纠察
+      </button>
+    </div>
+
+    <!-- 数据面板工具栏（全局搜索） -->
+    <div class="data-toolbar">
+      <input
+        class="search-input"
+        v-model="searchQuery"
+        type="text"
+        placeholder="搜索 API / 参数 / URL / 值"
+      />
+      <button v-if="searchQuery" class="btn btn-secondary clear-btn" @click="searchQuery = ''">清除</button>
     </div>
 
     <!-- 拦截模块 -->
@@ -858,13 +997,13 @@ function getCookieDiff(currentLog: Log, index: number) {
         </button>
       </div>
 
-      <div v-if="mockRules.length === 0" class="empty-state">
+      <div v-if="filteredMockRules.length === 0" class="empty-state">
         <p>暂无修改规则</p>
         <p class="hint">点击"新建规则"或在拦截模块中点击"修改"按钮快捷添加</p>
       </div>
 
       <div v-else class="mock-rules-list">
-        <div v-for="rule in mockRules" :key="rule.id" class="mock-rule-item">
+        <div v-for="rule in filteredMockRules" :key="rule.id" class="mock-rule-item">
           <div class="rule-header">
             <div class="rule-toggle">
               <input 
@@ -925,6 +1064,68 @@ function getCookieDiff(currentLog: Log, index: number) {
               取消
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 变量纠察模块 -->
+    <div v-show="activeTab === 'varpatrol'" class="varpatrol-container">
+      <div class="varpatrol-header">
+        <h2>🧪 变量纠察</h2>
+        <span v-if="varPatrolRunning" class="badge running">进行中…（两轮采集中）</span>
+        <span v-else-if="varPatrolResult" class="badge done">已完成</span>
+      </div>
+
+      <div v-if="!varPatrolResult">
+        <p class="hint">点击“🧪 变量纠察”开始两轮对比，结果将在此显示。</p>
+      </div>
+
+      <div v-else class="varpatrol-result">
+        <div class="result-meta">
+          <div>目标：{{ varPatrolResult.url }}</div>
+        </div>
+        <div class="result-section">
+          <h3>🍪 相同 Cookies <span class="count">{{ (filteredVarPatrolResult?.result.cookies || []).length }}</span></h3>
+          <div v-if="(filteredVarPatrolResult?.result.cookies || []).length === 0" class="empty-state small">无</div>
+          <ul v-else class="kv-list">
+            <li v-for="(item, i) in filteredVarPatrolResult!.result.cookies" :key="'ck'+i">
+              <span class="k">{{ item.key }}</span>
+              <span class="v">{{ item.value }}</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="result-section">
+          <h3>📦 相同 localStorage <span class="count">{{ (filteredVarPatrolResult?.result.localStorage || []).length }}</span></h3>
+          <div v-if="(filteredVarPatrolResult?.result.localStorage || []).length === 0" class="empty-state small">无</div>
+          <ul v-else class="kv-list">
+            <li v-for="(item, i) in filteredVarPatrolResult!.result.localStorage" :key="'ls'+i">
+              <span class="k">{{ item.key }}</span>
+              <span class="v">{{ item.value }}</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="result-section">
+          <h3>📦 相同 sessionStorage <span class="count">{{ (filteredVarPatrolResult?.result.sessionStorage || []).length }}</span></h3>
+          <div v-if="(filteredVarPatrolResult?.result.sessionStorage || []).length === 0" class="empty-state small">无</div>
+          <ul v-else class="kv-list">
+            <li v-for="(item, i) in filteredVarPatrolResult!.result.sessionStorage" :key="'ss'+i">
+              <span class="k">{{ item.key }}</span>
+              <span class="v">{{ item.value }}</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="result-section">
+          <h3>🌐 相同全局变量 <span class="count">{{ (filteredVarPatrolResult?.result.globals || []).length }}</span></h3>
+          <div v-if="(filteredVarPatrolResult?.result.globals || []).length === 0" class="empty-state small">无</div>
+          <ul v-else class="kv-list">
+            <li v-for="(item, i) in filteredVarPatrolResult!.result.globals" :key="'g'+i">
+              <span class="k">{{ item.key }}</span>
+              <span class="v">{{ item.value }}</span>
+            </li>
+          </ul>
         </div>
       </div>
     </div>
@@ -1263,6 +1464,56 @@ function getCookieDiff(currentLog: Log, index: number) {
   display: flex;
   gap: 12px;
 }
+
+/* 数据面板工具栏（搜索） */
+.data-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  background: white;
+  padding: 12px 20px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.08);
+}
+.data-toolbar .search-input {
+  flex: 1;
+  padding: 10px 12px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.data-toolbar .search-input:focus {
+  outline: none;
+  border-color: #667eea;
+}
+.data-toolbar .clear-btn {
+  padding: 8px 14px;
+}
+
+/* VarPatrol Styles */
+.varpatrol-container {
+  background: white;
+  padding: 20px 30px;
+  border-radius: 12px;
+  margin-top: 20px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+.varpatrol-header { display: flex; align-items: center; gap: 12px; }
+.varpatrol-header .badge { padding: 4px 8px; border-radius: 999px; font-size: 12px; }
+.varpatrol-header .badge.running { background: #fff3cd; color: #856404; }
+.varpatrol-header .badge.done { background: #d4edda; color: #155724; }
+.result-section { margin-top: 16px; }
+.result-section h3 { margin: 8px 0; font-size: 16px; }
+.result-section .count { color: #666; font-weight: normal; font-size: 14px; margin-left: 6px; }
+.kv-list, .globals-list { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr; gap: 6px; }
+.kv-list li, .globals-list li { background: #f8f9fa; padding: 8px 10px; border-radius: 6px; border: 1px solid #eee; }
+.kv-list .k { font-weight: 600; margin-right: 8px; }
+.kv-list .v { color: #555; word-break: break-all; }
+.globals-list .name { font-weight: 600; margin-right: 6px; }
+.globals-list .type { color: #888; margin-right: 6px; }
+.globals-list .gval { color: #333; }
+.empty-state.small { color: #888; font-size: 14px; }
 
 .tab-btn {
   padding: 10px 24px;

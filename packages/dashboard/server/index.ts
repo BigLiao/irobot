@@ -33,6 +33,32 @@ interface MockRule {
 let mockRules: MockRule[] = [];
 let selectedScript: string | null = null; // 存储选定的脚本文件名
 
+// 变量纠察状态
+type VarSnapshot = {
+  url: string;
+  timestamp: number;
+  userAgent?: string;
+  cookies: Record<string, string>;
+  localStorage: Record<string, string>;
+  sessionStorage: Record<string, string>;
+  // 新版：已扁平化的全局变量（过滤函数），key示例：foo.bar.0.baz
+  globalsFlat?: Record<string, string | number | boolean | null>;
+  // 兼容旧版
+  globals?: { name: string; type: string; value?: string | number | boolean }[];
+};
+
+const varPatrolState: {
+  running: boolean;
+  url: string | null;
+  phase: 0 | 1 | 2;
+  firstSnapshot: VarSnapshot | null;
+} = {
+  running: false,
+  url: null,
+  phase: 0,
+  firstSnapshot: null,
+};
+
 // WebSocket连接处理
 wss.on('connection', (ws, req) => {
   const url = req.url || '';
@@ -86,6 +112,34 @@ wss.on('connection', (ws, req) => {
             }));
           }
         }
+
+        // 发起变量纠察
+        if (data.type === 'RUN_VAR_PATROL' && data.url) {
+          console.log(`🧪 启动变量纠察: ${data.url}`);
+          // 若有正在运行的 injector，先停止
+          if (injectorProcess) {
+            stopInjector();
+          }
+          varPatrolState.running = true;
+          varPatrolState.url = data.url;
+          varPatrolState.phase = 1; // 第一轮
+          varPatrolState.firstSnapshot = null;
+
+          broadcastToDashboard({
+            type: 'VAR_PATROL_STARTED',
+            url: data.url,
+            timestamp: new Date().toISOString(),
+          });
+
+          // 启动第一轮
+          startInjector(data.url);
+          // 同步监控状态
+          broadcastToDashboard({
+            type: 'MONITOR_STARTED',
+            url: data.url,
+            timestamp: new Date().toISOString(),
+          });
+        }
       } catch (error) {
         console.error('❌ 处理dashboard消息错误:', error);
       }
@@ -107,6 +161,14 @@ wss.on('connection', (ws, req) => {
         rules: mockRules
       }));
     }
+
+    // 如果正处于变量纠察流程，立即下发指令
+    if (varPatrolState.running) {
+      try {
+        ws.send(JSON.stringify({ type: 'RUN_VAR_PATROL' }));
+        console.log('🧪 已向 Injector 下发变量纠察指令');
+      } catch {}
+    }
     
     ws.on('message', (message) => {
       // 只转发消息，不打印日志（避免大量日志输出）
@@ -120,8 +182,53 @@ wss.on('connection', (ws, req) => {
           console.error('❌ Injector 错误:', data.data?.message || data.message);
         }
         
-        // 转发到所有dashboard客户端
-        broadcastToDashboard(data);
+        // 变量纠察流程处理
+        if (data.type === 'VAR_PATROL_SNAPSHOT' && varPatrolState.running) {
+          if (varPatrolState.phase === 1) {
+            // 第一轮快照
+            varPatrolState.firstSnapshot = data.data as VarSnapshot;
+            console.log('🧪 第一轮变量快照已收到，重启浏览器进行第二轮');
+            // 停止并启动第二轮
+            stopInjector();
+            varPatrolState.phase = 2;
+            if (varPatrolState.url) {
+              startInjector(varPatrolState.url);
+              // 同步监控状态
+              broadcastToDashboard({
+                type: 'MONITOR_STARTED',
+                url: varPatrolState.url,
+                timestamp: new Date().toISOString(),
+              });
+            }
+          } else if (varPatrolState.phase === 2) {
+            // 第二轮快照
+            const second = data.data as VarSnapshot;
+            const first = varPatrolState.firstSnapshot;
+            console.log('🧪 第二轮变量快照已收到，开始对比');
+            const result = first ? compareVarSnapshots(first, second) : null;
+
+            console.log('🧪 变量纠察结果:', result);
+
+            broadcastToDashboard({
+              type: 'VAR_PATROL_RESULT',
+              url: varPatrolState.url,
+              first: first,
+              second: second,
+              result,
+              timestamp: new Date().toISOString(),
+            });
+
+            // 结束流程
+            stopInjector();
+            varPatrolState.running = false;
+            varPatrolState.url = null;
+            varPatrolState.phase = 0;
+            varPatrolState.firstSnapshot = null;
+          }
+        } else {
+          // 转发到所有dashboard客户端
+          broadcastToDashboard(data);
+        }
       } catch (error) {
         console.error('❌ 处理 injector 消息错误:', error);
       }
@@ -129,9 +236,9 @@ wss.on('connection', (ws, req) => {
     
     ws.on('close', () => {
       console.log('🔌 Injector 客户端已断开');
-      injectorSocket = null;
-    });
-  }
+    injectorSocket = null;
+  });
+}
   
   ws.on('error', (error) => {
     console.error('❌ WebSocket 错误:', error);
@@ -203,6 +310,47 @@ function stopInjector() {
   }
 }
 
+// 比较两轮变量快照，找出相同项
+function compareVarSnapshots(a: VarSnapshot, b: VarSnapshot) {
+  const intersectKV = (ka: Record<string, string>, kb: Record<string, string>) => {
+    const out: { key: string; value: string }[] = [];
+    for (const k of Object.keys(ka)) {
+      if (kb.hasOwnProperty(k) && ka[k] === kb[k]) {
+        out.push({ key: k, value: ka[k] });
+      }
+    }
+    return out;
+  };
+
+  // Globals 扁平化对比
+  const intersectAnyKV = (
+    ka?: Record<string, string | number | boolean | null>,
+    kb?: Record<string, string | number | boolean | null>
+  ) => {
+    const out: { key: string; value: string | number | boolean | null }[] = [];
+    if (!ka || !kb) return out;
+    for (const k of Object.keys(ka)) {
+      if (Object.prototype.hasOwnProperty.call(kb, k)) {
+        const va = ka[k];
+        const vb = kb[k];
+        if (va === vb) {
+          out.push({ key: k, value: va });
+        }
+      }
+    }
+    return out;
+  };
+
+  const globals = intersectAnyKV(a.globalsFlat, b.globalsFlat);
+
+  return {
+    cookies: intersectKV(a.cookies, b.cookies),
+    localStorage: intersectKV(a.localStorage, b.localStorage),
+    sessionStorage: intersectKV(a.sessionStorage, b.sessionStorage),
+    globals,
+  };
+}
+
 // --- Static File Server for Dashboard Frontend ---
 const dashboardPath = PATHS.webDir;
 app.use(express.static(dashboardPath));
@@ -263,4 +411,3 @@ process.on('SIGINT', () => {
     process.exit(0);
   });
 });
-

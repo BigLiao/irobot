@@ -69,6 +69,8 @@ if (customScriptFile) {
   }
 }
 
+let gBrowser: Browser | null = null;
+
 async function main() {
   let browser: Browser | null = null;
   // 暂存需要通过页面桥转发到 Dashboard 的事件（在桥未就绪时缓存）
@@ -124,6 +126,7 @@ async function main() {
     });
 
     console.log('✅ 浏览器已启动');
+    gBrowser = browser;
 
     const page: Page = await browser.newPage();
 
@@ -279,6 +282,7 @@ async function main() {
 
   } catch (error) {
     console.error('\n❌ 发生错误:', error);
+    try { await gBrowser?.close(); } catch {}
     fs.rmSync(tmpUserDir, { recursive: true });
     process.exit(1);
   }
@@ -287,12 +291,14 @@ async function main() {
 // 优雅关闭
 process.on('SIGINT', async () => {
   console.log('\n\n🛑 收到停止信号，正在关闭...');
+  try { await gBrowser?.close(); } catch {}
   fs.rmSync(tmpUserDir, { recursive: true });
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('\n\n🛑 收到终止信号，正在关闭...');
+  try { await gBrowser?.close(); } catch {}
   fs.rmSync(tmpUserDir, { recursive: true });
   process.exit(0);
 });
@@ -300,6 +306,7 @@ process.on('SIGTERM', async () => {
 // 启动
 main().catch((error) => {
   console.error('❌ 启动失败:', error);
+  try { gBrowser?.close(); } catch {}
   fs.rmSync(tmpUserDir, { recursive: true });
   process.exit(1);
 });
