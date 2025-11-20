@@ -8,6 +8,8 @@ interface Log {
   count?: number; // 调用次数
   eventHash?: string; // 事件哈希，用于去重
   modified?: boolean; // 是否被修改过
+  stacks?: { timestamp: string; content: string }[]; // 调用栈历史
+  selectedStackIndex?: number; // 当前选中的调用栈索引
 }
 
 interface MockRule {
@@ -180,11 +182,37 @@ const connectWebSocket = () => {
         
         if (existingIndex !== undefined && logs.value[existingIndex]) {
           // 已存在相同事件，增加计数
-          logs.value[existingIndex].count = (logs.value[existingIndex].count || 1) + 1;
-          logs.value[existingIndex].timestamp = log.timestamp; // 更新最后调用时间
+          const existingLog = logs.value[existingIndex];
+          existingLog.count = (existingLog.count || 1) + 1;
+          existingLog.timestamp = log.timestamp; // 更新最后调用时间
+          
+          // 添加新的调用栈到历史记录
+          if (log.data.stack) {
+            if (!existingLog.stacks) {
+              existingLog.stacks = [];
+              // 如果之前没有stacks数组，把当前的stack放进去作为第一个
+              if (existingLog.data.stack) {
+                existingLog.stacks.push({
+                  timestamp: existingLog.timestamp, // 注意这里可能时间不准，但作为初始值尚可
+                  content: existingLog.data.stack
+                });
+              }
+            }
+            existingLog.stacks.push({
+              timestamp: log.timestamp,
+              content: log.data.stack
+            });
+            // 限制堆栈历史数量，防止内存无限增长
+            if (existingLog.stacks.length > 50) {
+              existingLog.stacks.shift();
+            }
+            // 自动选择最新的堆栈
+            existingLog.selectedStackIndex = existingLog.stacks.length - 1;
+          }
+
           // 更新modified标记
           if (log.data?.modified) {
-            logs.value[existingIndex].modified = true;
+            existingLog.modified = true;
           }
         } else {
           // 新事件，添加到列表
@@ -193,6 +221,11 @@ const connectWebSocket = () => {
             count: 1,
             eventHash,
             modified: log.data?.modified || false,
+            stacks: log.data.stack ? [{
+              timestamp: log.timestamp,
+              content: log.data.stack
+            }] : [],
+            selectedStackIndex: 0
           };
           logs.value.unshift(newLog);
           // 更新 hash 映射（索引会因为 unshift 而改变，需要重建）
@@ -414,7 +447,7 @@ function sendMockRules() {
 // 获取可用的自定义脚本列表
 async function fetchAvailableScripts() {
   try {
-    const response = await fetch('/api/scripts');
+    const response = await fetch('http://localhost:3000/api/scripts');
     const data = await response.json();
     availableScripts.value = data.scripts || [];
   } catch (error) {
@@ -659,8 +692,34 @@ onUnmounted(() => {
 
           <!-- 调用栈 -->
           <details v-if="log.data.stack" class="stack-trace">
-            <summary>📚 调用栈</summary>
-            <pre class="stack-content">{{ log.data.stack }}</pre>
+            <summary>
+              📚 调用栈 
+              <span v-if="log.stacks && log.stacks.length > 1" class="stack-count-badge">
+                {{ log.stacks.length }} 个记录
+              </span>
+            </summary>
+            
+            <div v-if="log.stacks && log.stacks.length > 1" class="stack-switcher">
+              <div class="stack-controls">
+                <label>选择调用记录:</label>
+                <select 
+                  v-model="log.selectedStackIndex" 
+                  @click.stop 
+                  class="stack-select"
+                >
+                  <option 
+                    v-for="(stack, i) in log.stacks" 
+                    :key="i" 
+                    :value="i"
+                  >
+                    #{{ i + 1 }} - {{ new Date(stack.timestamp).toLocaleTimeString() }}
+                  </option>
+                </select>
+              </div>
+              <pre class="stack-content">{{ log.stacks[log.selectedStackIndex || 0].content }}</pre>
+              <div class="stack-time">时间: {{ new Date(log.stacks[log.selectedStackIndex || 0].timestamp).toLocaleTimeString() }}</div>
+            </div>
+            <pre v-else class="stack-content">{{ log.data.stack }}</pre>
           </details>
         </div>
 
@@ -1716,5 +1775,44 @@ onUnmounted(() => {
   margin: 5px 0 0 0;
   font-size: 12px;
   color: #999;
+}
+.stack-count-badge {
+  background: #4a5568;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.stack-switcher {
+  margin-top: 10px;
+}
+
+.stack-controls {
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #4a5568;
+}
+
+.stack-select {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid #cbd5e0;
+  background: white;
+  font-size: 13px;
+  color: #2d3748;
+  cursor: pointer;
+}
+
+.stack-time {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #718096;
+  text-align: right;
 }
 </style>
