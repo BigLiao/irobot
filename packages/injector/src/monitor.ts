@@ -1,7 +1,7 @@
 // packages/injector/src/monitor.ts
 // 这个脚本会被注入到目标网页，用于监控其指纹采集行为
 
-export {};
+export { };
 
 declare global {
   interface Window {
@@ -11,7 +11,7 @@ declare global {
   const MOCK_RULES_PLACEHOLDER: any;
 }
 
-type FingerprintCategory = 'canvas' | 'webgl' | 'font' | 'webrtc' | 'audio' | 'screen' | 'navigator' | 'media' | 'battery' | 'performance';
+type FingerprintCategory = 'canvas' | 'webgl' | 'font' | 'webrtc' | 'audio' | 'screen' | 'navigator' | 'media' | 'battery' | 'performance' | 'cookie';
 
 interface FingerprintEventPayload {
   category: FingerprintCategory;
@@ -75,6 +75,7 @@ function setupHooks() {
     hookMediaDevicesApis();
     hookBatteryApis();
     hookPerformanceApis();
+    hookCookieApis();
     console.log('[Injector] 指纹相关 API Hook 完成');
   } catch (error) {
     console.error('[Injector] Hook 初始化失败:', error);
@@ -110,7 +111,7 @@ function getWebSocket(wsUrl: string) {
   socket.addEventListener('message', (event) => {
     try {
       const data = JSON.parse(event.data);
-      
+
       // 接收修改规则更新
       if (data.type === 'UPDATE_MOCK_RULES' && data.rules) {
         mockRules = data.rules;
@@ -171,10 +172,10 @@ function flushMessageQueue() {
 function reportFingerprintEvent(category: FingerprintCategory, api: string, detail?: Record<string, any>) {
   // 生成事件 Hash，用于在 Dashboard 端去重和计数
   const eventHash = generateEventHash(category, api, detail);
-  
+
   // 检查是否有匹配的修改规则
   const matchedRule = findMatchingMockRule(api);
-  
+
   const payload: FingerprintEventPayload = {
     category,
     api,
@@ -215,7 +216,7 @@ function generateEventHash(category: FingerprintCategory, api: string, detail?: 
       parameter: detail?.parameter,
       name: detail?.name,
     };
-    
+
     // 简单的字符串 Hash 算法
     const str = JSON.stringify(hashData);
     let hash = 0;
@@ -234,20 +235,20 @@ function generateEventHash(category: FingerprintCategory, api: string, detail?: 
 function hookCanvasApis() {
   if (typeof HTMLCanvasElement !== 'undefined') {
     const canvasProto = HTMLCanvasElement.prototype;
-    
+
     // 保存原始 toDataURL 方法，供 captureCanvasSnapshot 使用
     originalToDataURL = canvasProto.toDataURL;
-    
+
     // toDataURL 是明确的指纹采集信号
     hookMethod(canvasProto, 'toDataURL', 'canvas', 'HTMLCanvasElement.prototype.toDataURL', function (args) {
       return buildCanvasDetail(this as HTMLCanvasElement, args, 'toDataURL', true);
     });
-    
+
     // toBlob 也是明确的指纹采集信号
     hookMethod(canvasProto, 'toBlob', 'canvas', 'HTMLCanvasElement.prototype.toBlob', function (args) {
       return buildCanvasDetail(this as HTMLCanvasElement, args, 'toBlob', true);
     });
-    
+
     // getContext 太频繁，不捕获快照，只记录首次调用
     // hookMethod(canvasProto, 'getContext', 'canvas', function (args) {
     //   const contextId = args[0];
@@ -263,7 +264,7 @@ function hookCanvasApis() {
 
   if (typeof CanvasRenderingContext2D !== 'undefined') {
     const ctxProto = CanvasRenderingContext2D.prototype;
-    
+
     // getImageData 是指纹采集的关键方法
     hookMethod(ctxProto, 'getImageData', 'canvas', 'CanvasRenderingContext2D.prototype.getImageData', function (args) {
       const canvas = (this as CanvasRenderingContext2D).canvas;
@@ -310,16 +311,16 @@ function captureCanvasSnapshot(canvas: HTMLCanvasElement | OffscreenCanvas, useC
     if (canvas.width === 0 || canvas.height === 0) {
       return undefined;
     }
-    
+
     // 缓存检查，避免重复捕获同一个 canvas
     if (useCache && snapshotCache.has(canvas)) {
       return snapshotCache.get(canvas);
     }
-    
+
     // 使用原始 toDataURL 方法，避免触发 Hook 导致递归
     if ('toDataURL' in canvas && typeof canvas.toDataURL === 'function') {
       let dataUrl: string;
-      
+
       if (originalToDataURL && canvas instanceof HTMLCanvasElement) {
         // 调用原始方法，避免递归
         dataUrl = originalToDataURL.call(canvas, 'image/png');
@@ -327,11 +328,11 @@ function captureCanvasSnapshot(canvas: HTMLCanvasElement | OffscreenCanvas, useC
         // 降级方案：直接调用（可能会触发 Hook，但有缓存保护）
         dataUrl = canvas.toDataURL('image/png');
       }
-      
+
       if (useCache) {
         snapshotCache.set(canvas, dataUrl);
       }
-      
+
       return dataUrl;
     }
     return undefined;
@@ -345,37 +346,37 @@ function hookFontApis() {
   // ==================== Font Metrics Measurement ====================
   // 监控通过 Canvas measureText 进行的字体指纹检测
   // 这种技术会尝试大量已知字体，通过测量渲染尺寸来检测系统字体
-  
+
   if (typeof CanvasRenderingContext2D !== 'undefined') {
     const ctxProto = CanvasRenderingContext2D.prototype;
-    
+
     // Hook measureText - 检测 Font Metrics Measurement
     // 使用调用频率和字体变化模式来识别指纹采集行为
     let measureTextCallCount = 0;
     let lastMeasureFont = '';
     let fontChangeCount = 0;
     let lastReportTime = 0;
-    
+
     const originalMeasureText = ctxProto.measureText;
     if (originalMeasureText && typeof originalMeasureText === 'function') {
-      ctxProto.measureText = function(this: CanvasRenderingContext2D, text: string): TextMetrics {
+      ctxProto.measureText = function (this: CanvasRenderingContext2D, text: string): TextMetrics {
         const result = originalMeasureText.call(this, text);
-        
+
         try {
           measureTextCallCount++;
           const currentFont = this.font;
-          
+
           // 检测字体变化（指纹检测的特征）
           if (currentFont !== lastMeasureFont) {
             fontChangeCount++;
             lastMeasureFont = currentFont;
           }
-          
+
           // 当检测到频繁的字体测量时上报（可能是指纹采集）
           // 规则：10 次调用内有 3+ 次字体变化，或总调用次数 > 50
           const now = Date.now();
           const shouldReport = true;
-          
+
           if (shouldReport && now - lastReportTime > 1000) {
             reportFingerprintEvent('font', 'measureText', {
               totalCalls: measureTextCallCount,
@@ -391,7 +392,7 @@ function hookFontApis() {
               },
             });
             lastReportTime = now;
-            
+
             // 重置计数器
             if (measureTextCallCount >= 100) {
               measureTextCallCount = 0;
@@ -401,10 +402,10 @@ function hookFontApis() {
         } catch (e) {
           console.warn('[Injector] measureText Hook 异常:', e);
         }
-        
+
         return result;
       };
-      
+
       Object.defineProperty(ctxProto.measureText, '__irobot_hooked__', {
         value: true,
         enumerable: false,
@@ -425,7 +426,7 @@ function hookFontApis() {
         sample: truncateText(args[1]),
       };
     });
-    
+
     // load() 方法：加载字体
     hookMethod(fontSetProto, 'load', 'font', 'FontFaceSet.prototype.load', (args) => {
       return {
@@ -438,44 +439,44 @@ function hookFontApis() {
   // ==================== DOM-based Font Detection ====================
   // 监控通过 DOM 元素尺寸测量进行的字体检测
   // 这种技术会创建不可见的 DOM 元素，设置不同字体，测量尺寸变化
-  
+
   // Hook offsetWidth/offsetHeight getter（用于字体检测的关键属性）
   if (typeof HTMLElement !== 'undefined') {
     const elementProto = HTMLElement.prototype;
-    
+
     // 跟踪相同文本内容的重复测量（更精确的字体检测特征）
     const textContentMeasureCount = new Map<string, number>(); // textContent -> count
     const textContentFonts = new Map<string, Set<string>>();   // textContent -> Set<fontFamily>
     let lastCleanupTime = Date.now();
-    
+
     // Hook offsetWidth
     const originalOffsetWidthDesc = Object.getOwnPropertyDescriptor(elementProto, 'offsetWidth');
     if (originalOffsetWidthDesc && originalOffsetWidthDesc.get) {
       const originalOffsetWidthGet = originalOffsetWidthDesc.get;
-      
+
       Object.defineProperty(elementProto, 'offsetWidth', {
         get() {
           const value = originalOffsetWidthGet.call(this);
-          
+
           try {
             const element = this as HTMLElement;
             const textContent = element.textContent || '';
-            
+
             // 只跟踪有文本内容的元素
             if (textContent.length > 0 && textContent.length < 200) {
               const now = Date.now();
-              
+
               // 每 5 秒清理一次计数器，避免内存泄漏
               if (now - lastCleanupTime > 5000) {
                 textContentMeasureCount.clear();
                 textContentFonts.clear();
                 lastCleanupTime = now;
               }
-              
+
               // 记录该文本内容的测量次数
               const currentCount = textContentMeasureCount.get(textContent) || 0;
               textContentMeasureCount.set(textContent, currentCount + 1);
-              
+
               // 记录使用的字体
               const computedStyle = window.getComputedStyle(element);
               const fontFamily = computedStyle.fontFamily;
@@ -483,11 +484,11 @@ function hookFontApis() {
                 textContentFonts.set(textContent, new Set());
               }
               textContentFonts.get(textContent)!.add(fontFamily);
-              
+
               // 检测特征：相同文本被测量 > 5 次，且使用了不同字体
               const measureCount = textContentMeasureCount.get(textContent)!;
               const fontCount = textContentFonts.get(textContent)!.size;
-              
+
               if (measureCount === 5 || measureCount === 10 || measureCount === 20 || measureCount === 50) {
                 reportFingerprintEvent('font', 'offsetWidth', {
                   textContent: truncateText(textContent, 50),
@@ -504,14 +505,14 @@ function hookFontApis() {
           } catch (e) {
             // 忽略错误，避免影响正常网页功能
           }
-          
+
           return value;
         },
         configurable: true,
         enumerable: originalOffsetWidthDesc.enumerable,
       });
     }
-    
+
     // Hook getBoundingClientRect（另一种测量尺寸的方法）
     const originalGetBoundingClientRect = elementProto.getBoundingClientRect;
     if (originalGetBoundingClientRect && typeof originalGetBoundingClientRect === 'function') {
@@ -519,29 +520,29 @@ function hookFontApis() {
       const rectTextMeasureCount = new Map<string, number>();
       const rectTextFonts = new Map<string, Set<string>>();
       let lastRectCleanupTime = Date.now();
-      
-      elementProto.getBoundingClientRect = function(this: HTMLElement): DOMRect {
+
+      elementProto.getBoundingClientRect = function (this: HTMLElement): DOMRect {
         const result = originalGetBoundingClientRect.call(this);
-        
+
         try {
           const element = this as HTMLElement;
           const textContent = element.textContent || '';
-          
+
           // 只跟踪有文本内容的元素
           if (textContent.length > 0 && textContent.length < 200) {
             const now = Date.now();
-            
+
             // 每 5 秒清理一次
             if (now - lastRectCleanupTime > 5000) {
               rectTextMeasureCount.clear();
               rectTextFonts.clear();
               lastRectCleanupTime = now;
             }
-            
+
             // 记录测量次数
             const currentCount = rectTextMeasureCount.get(textContent) || 0;
             rectTextMeasureCount.set(textContent, currentCount + 1);
-            
+
             // 记录字体
             const computedStyle = window.getComputedStyle(element);
             const fontFamily = computedStyle.fontFamily;
@@ -549,11 +550,11 @@ function hookFontApis() {
               rectTextFonts.set(textContent, new Set());
             }
             rectTextFonts.get(textContent)!.add(fontFamily);
-            
+
             // 相同文本被测量 > 5 次
             const measureCount = rectTextMeasureCount.get(textContent)!;
             const fontCount = rectTextFonts.get(textContent)!.size;
-            
+
             if (measureCount === 10 || measureCount === 20 || measureCount === 30 || measureCount === 50) {
               reportFingerprintEvent('font', 'getBoundingClientRect', {
                 textContent: truncateText(textContent, 50),
@@ -571,10 +572,10 @@ function hookFontApis() {
         } catch (e) {
           // 忽略错误
         }
-        
+
         return result;
       };
-      
+
       Object.defineProperty(elementProto.getBoundingClientRect, '__irobot_hooked__', {
         value: true,
         enumerable: false,
@@ -613,7 +614,7 @@ function hookWebGLApis() {
       };
     });
   }
-  
+
   // WebGL2RenderingContext (WebGL 2.0)
   if (typeof WebGL2RenderingContext !== 'undefined') {
     const proto = WebGL2RenderingContext.prototype;
@@ -700,6 +701,88 @@ function hookWebRTCApis() {
   });
 }
 
+function hookCookieApis() {
+  console.log('[Injector] 开始 Hook Cookie API');
+  try {
+    // 1. 尝试获取当前 document 实例上的 descriptor (可能已经被 hook)
+    let cookieDesc = Object.getOwnPropertyDescriptor(document, 'cookie');
+
+    // 2. 如果没有，尝试从原型链获取
+    if (!cookieDesc) {
+      cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ||
+        Object.getOwnPropertyDescriptor(HTMLDocument.prototype, 'cookie');
+    }
+
+    if (!cookieDesc || !cookieDesc.set) {
+      console.warn('[Injector] 无法获取 document.cookie descriptor');
+      return;
+    }
+
+    const originalSet = cookieDesc.set;
+    const originalGet = cookieDesc.get;
+
+    console.log('[Injector] 原始 Cookie Descriptor 获取成功', {
+      configurable: cookieDesc.configurable,
+      enumerable: cookieDesc.enumerable
+    });
+
+    if (!cookieDesc.configurable) {
+      console.warn('[Injector] document.cookie 不可配置，无法 Hook');
+      return;
+    }
+
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return originalGet ? originalGet.call(document) : '';
+      },
+      set(val) {
+        console.log('[Injector] 设置 cookie:', val);
+        try {
+          // 上报 cookie 设置操作
+          reportFingerprintEvent('cookie', 'document.cookie', {
+            action: 'set',
+            value: val,
+            parsed: parseCookie(val)
+          });
+        } catch (e) {
+          console.error('[Injector] Cookie Hook Error:', e);
+        }
+
+        if (originalSet) {
+          originalSet.call(document, val);
+        }
+      }
+    });
+    console.log('[Injector] Cookie Hook 成功应用');
+  } catch (e) {
+    console.error('[Injector] Hook Cookie 失败:', e);
+  }
+}
+
+function parseCookie(cookieStr: string) {
+  const parts = cookieStr.split(';');
+  const mainPart = parts[0].trim();
+  const [key, ...valParts] = mainPart.split('=');
+  const value = valParts.join('=');
+
+  const attributes: Record<string, string | boolean> = {};
+
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i].trim();
+    const [attrKey, ...attrValParts] = part.split('=');
+    const attrVal = attrValParts.join('=');
+    attributes[attrKey.toLowerCase()] = attrVal || true;
+  }
+
+  return {
+    key,
+    value,
+    attributes
+  };
+}
+
 type DetailBuilder = (this: any, args: any[]) => Record<string, any> | void;
 
 function hookMethod(target: any, methodName: string, category: FingerprintCategory, fullApiName: string, detailBuilder?: DetailBuilder) {
@@ -717,38 +800,38 @@ function hookMethod(target: any, methodName: string, category: FingerprintCatego
     let result: any;
     let error: any;
     let modified = false;
-    
+
     // 检查是否有匹配的修改规则 - 使用完整API名称
     const matchedRule = findMatchingMockRule(fullApiName);
-    
+
     try {
       result = original.apply(this, args);
-      
+
       // 如果有匹配的修改规则，替换返回值
       if (matchedRule && !error) {
         const mockResponse = matchedRule.response;
-        
+
         // 如果原始返回值是Promise，需要特殊处理
         if (result instanceof Promise) {
           result = result.then(() => {
             // 解析mock响应
-            const parsedResponse = typeof mockResponse === 'string' 
-              ? (mockResponse.startsWith('{') || mockResponse.startsWith('[') 
-                  ? JSON.parse(mockResponse) 
-                  : mockResponse)
+            const parsedResponse = typeof mockResponse === 'string'
+              ? (mockResponse.startsWith('{') || mockResponse.startsWith('[')
+                ? JSON.parse(mockResponse)
+                : mockResponse)
               : mockResponse;
-            
+
             console.log(`[Injector] 修改了 ${fullApiName} 的返回值:`, parsedResponse);
             return parsedResponse;
           });
         } else {
           // 同步返回值直接替换
-          const parsedResponse = typeof mockResponse === 'string' 
-            ? (mockResponse.startsWith('{') || mockResponse.startsWith('[') 
-                ? JSON.parse(mockResponse) 
-                : mockResponse)
+          const parsedResponse = typeof mockResponse === 'string'
+            ? (mockResponse.startsWith('{') || mockResponse.startsWith('[')
+              ? JSON.parse(mockResponse)
+              : mockResponse)
             : mockResponse;
-          
+
           result = parsedResponse;
           console.log(`[Injector] 修改了 ${fullApiName} 的返回值:`, result);
         }
@@ -762,10 +845,10 @@ function hookMethod(target: any, methodName: string, category: FingerprintCatego
         const duration = performance.now() - startTime;
         const detailResult = detailBuilder ? detailBuilder.call(this, args) : undefined;
         const detail = detailResult === undefined ? {} : detailResult;
-        
+
         // 序列化输入参数
         const input = serializeValue(args);
-        
+
         // 序列化输出结果
         let output: any;
         if (error) {
@@ -794,7 +877,7 @@ function hookMethod(target: any, methodName: string, category: FingerprintCatego
         } else {
           output = serializeValue(result);
         }
-        
+
         reportFingerprintEvent(category, fullApiName, {
           ...detail,
           duration,
@@ -805,7 +888,7 @@ function hookMethod(target: any, methodName: string, category: FingerprintCatego
         console.error('[Injector] Hook 上报异常:', fullApiName, reportError);
       }
     }
-    
+
     return result;
   };
 
@@ -827,50 +910,50 @@ function serializeValue(value: any, maxDepth = 3, currentDepth = 0): any {
   if (currentDepth > maxDepth) {
     return '[Max Depth Reached]';
   }
-  
+
   if (value === null || value === undefined) {
     return value;
   }
-  
+
   const type = typeof value;
-  
+
   if (type === 'function') {
     return `[Function: ${value.name || 'anonymous'}]`;
   }
-  
+
   if (type === 'symbol') {
     return `[Symbol: ${value.toString()}]`;
   }
-  
+
   if (type !== 'object') {
     return value;
   }
-  
+
   // 特殊对象处理
   if (value instanceof HTMLCanvasElement) {
     return `[HTMLCanvasElement: ${value.width}x${value.height}]`;
   }
-  
+
   if (value instanceof HTMLElement) {
     return `[HTMLElement: ${value.tagName}]`;
   }
-  
+
   if (value instanceof Error) {
     return { error: value.message, stack: value.stack?.split('\n').slice(0, 3).join('\n') };
   }
-  
+
   if (Array.isArray(value)) {
     if (value.length > 10) {
       return [...value.slice(0, 10).map(v => serializeValue(v, maxDepth, currentDepth + 1)), `... ${value.length - 10} more items`];
     }
     return value.map(v => serializeValue(v, maxDepth, currentDepth + 1));
   }
-  
+
   // 普通对象
   try {
     const serialized: any = {};
     const keys = Object.keys(value);
-    
+
     if (keys.length > 20) {
       keys.slice(0, 20).forEach(key => {
         serialized[key] = serializeValue(value[key], maxDepth, currentDepth + 1);
@@ -881,7 +964,7 @@ function serializeValue(value: any, maxDepth = 3, currentDepth = 0): any {
         serialized[key] = serializeValue(value[key], maxDepth, currentDepth + 1);
       });
     }
-    
+
     return serialized;
   } catch (e) {
     return '[Unserializable Object]';
@@ -986,7 +1069,7 @@ function hookAudioApis() {
 function hookScreenApis() {
   // Screen 属性通常通过 getter 访问，我们 Hook 常见的属性读取
   const screenProps = ['width', 'height', 'availWidth', 'availHeight', 'colorDepth', 'pixelDepth'];
-  
+
   screenProps.forEach((prop) => {
     try {
       const original = Object.getOwnPropertyDescriptor(Screen.prototype, prop);
@@ -1029,12 +1112,12 @@ function hookNavigatorApis() {
   sensitiveProps.forEach((prop) => {
     try {
       const original = Object.getOwnPropertyDescriptor(Navigator.prototype, prop) ||
-                       Object.getOwnPropertyDescriptor(window.navigator, prop);
+        Object.getOwnPropertyDescriptor(window.navigator, prop);
       if (!original || !original.get) return;
 
       // 保存原始 getter
       const originalGet = original.get;
-      
+
       const descriptor: PropertyDescriptor = {
         get() {
           const value = originalGet!.call(this);
@@ -1061,7 +1144,7 @@ function hookNavigatorApis() {
     const originalPluginsDescriptor = Object.getOwnPropertyDescriptor(Navigator.prototype, 'plugins');
     if (originalPluginsDescriptor && originalPluginsDescriptor.get) {
       const originalPluginsGet = originalPluginsDescriptor.get;
-      
+
       Object.defineProperty(Navigator.prototype, 'plugins', {
         get() {
           // 使用原始 getter 获取值，避免递归

@@ -28,7 +28,7 @@ const targetUrl = ref('https://www.baidu.com');
 const isMonitoring = ref(false);
 const wsConnected = ref(false);
 const selectedCategory = ref<string>('all');
-const activeTab = ref<'intercept' | 'mock'>('intercept');
+const activeTab = ref<'intercept' | 'mock' | 'cookie'>('intercept');
 const mockRules = ref<MockRule[]>([]);
 const editingRule = ref<MockRule | null>(null);
 const showRuleEditor = ref(false);
@@ -127,6 +127,7 @@ function getCategoryIcon(category: string): string {
     media: '📹',
     battery: '🔋',
     performance: '⚡',
+    cookie: '🍪',
     all: '📊',
   };
   return icons[category] || '📋';
@@ -485,6 +486,41 @@ onUnmounted(() => {
   // 保存选定的脚本到localStorage
   localStorage.setItem('irobot_selected_script', selectedScript.value);
 });
+// ============= Cookie 模块 =============
+const cookieLogs = computed(() => {
+  return logs.value.filter(
+    (log) => log.type === 'FINGERPRINT_EVENT' && log.data?.category === 'cookie'
+  );
+});
+
+function getCookieDiff(currentLog: Log, index: number) {
+  // 找到上一个 cookie log (在 filteredLogs 中是下一个，因为是倒序)
+  // 注意：这里应该在所有 logs 中找上一个 cookie log，而不是 filteredLogs
+  // 但为了简单起见，我们在 cookieLogs 中找
+  
+  const allCookieLogs = cookieLogs.value;
+  // cookieLogs 也是倒序的，所以"上一个"是 index + 1
+  const prevLog = allCookieLogs[index + 1];
+  
+  if (!prevLog) {
+    return { type: 'new', diff: [] };
+  }
+  
+  const currentVal = currentLog.data.detail?.value || '';
+  const prevVal = prevLog.data.detail?.value || '';
+  
+  if (currentVal === prevVal) {
+    return { type: 'unchanged', diff: [] };
+  }
+  
+  return {
+    type: 'changed',
+    diff: [
+      { label: 'Old', value: prevVal, class: 'diff-old' },
+      { label: 'New', value: currentVal, class: 'diff-new' }
+    ]
+  };
+}
 </script>
 
 <template>
@@ -592,6 +628,13 @@ onUnmounted(() => {
         @click="activeTab = 'mock'"
       >
         🔧 修改
+      </button>
+      <button 
+        class="tab-btn" 
+        :class="{ active: activeTab === 'cookie' }"
+        @click="activeTab = 'cookie'"
+      >
+        🍪 Cookies
       </button>
     </div>
 
@@ -726,6 +769,60 @@ onUnmounted(() => {
         <pre v-else class="log-data">{{ JSON.stringify(log.data, null, 2) }}</pre>
       </div>
     </div>
+    </div>
+
+    <!-- Cookie 模块 -->
+    <div v-show="activeTab === 'cookie'" class="cookie-container">
+      <div class="cookie-header">
+        <h2>🍪 Cookie 变更记录</h2>
+        <span class="cookie-count">共 {{ cookieLogs.length }} 条记录</span>
+      </div>
+
+      <div v-if="cookieLogs.length === 0" class="empty-state">
+        <p>暂无 Cookie 变更记录</p>
+        <p class="hint">当页面修改 document.cookie 时会显示在这里</p>
+      </div>
+
+      <div v-else class="cookie-list">
+        <div v-for="(log, index) in cookieLogs" :key="index" class="cookie-item">
+          <div class="cookie-item-header">
+            <span class="cookie-time">{{ new Date(log.timestamp).toLocaleTimeString() }}</span>
+            <span class="cookie-action">SET</span>
+            <span class="cookie-key">{{ log.data.detail?.parsed?.key }}</span>
+          </div>
+          
+          <div class="cookie-content">
+            <div class="cookie-value-row">
+              <span class="label">Value:</span>
+              <span class="value">{{ log.data.detail?.parsed?.value }}</span>
+            </div>
+            
+            <div v-if="log.data.detail?.parsed?.attributes" class="cookie-attributes">
+              <span v-for="(val, key) in log.data.detail.parsed.attributes" :key="key" class="cookie-attr">
+                {{ key }}{{ val === true ? '' : `=${val}` }}
+              </span>
+            </div>
+            
+            <!-- Diff View -->
+            <div v-if="getCookieDiff(log, index).type === 'changed'" class="cookie-diff">
+              <div class="diff-row old">
+                <span class="diff-label">Old:</span>
+                <span class="diff-val">{{ getCookieDiff(log, index).diff[0].value }}</span>
+              </div>
+              <div class="diff-row new">
+                <span class="diff-label">New:</span>
+                <span class="diff-val">{{ getCookieDiff(log, index).diff[1].value }}</span>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Stack Trace -->
+          <details v-if="log.data.stack" class="cookie-stack">
+            <summary>📚 调用栈</summary>
+            <pre class="stack-content">{{ log.data.stack }}</pre>
+          </details>
+        </div>
+      </div>
     </div>
 
     <!-- 修改模块 -->
@@ -1814,5 +1911,149 @@ onUnmounted(() => {
   font-size: 12px;
   color: #718096;
   text-align: right;
+}
+
+/* Cookie Tab Styles */
+.cookie-container {
+  padding: 20px;
+}
+
+.cookie-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.cookie-count {
+  color: #888;
+  font-size: 0.9em;
+}
+
+.cookie-list {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.cookie-item {
+  background: #1e1e1e;
+  border-radius: 8px;
+  padding: 15px;
+  border: 1px solid #333;
+}
+
+.cookie-item-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #333;
+}
+
+.cookie-time {
+  color: #888;
+  font-size: 0.85em;
+  font-family: monospace;
+}
+
+.cookie-action {
+  background: #2c3e50;
+  color: #3498db;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.8em;
+  font-weight: bold;
+}
+
+.cookie-key {
+  color: #e67e22;
+  font-weight: bold;
+  font-family: monospace;
+}
+
+.cookie-content {
+  margin-bottom: 10px;
+}
+
+.cookie-value-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.cookie-value-row .label {
+  color: #888;
+  min-width: 50px;
+}
+
+.cookie-value-row .value {
+  color: #a5d6a7;
+  font-family: monospace;
+}
+
+.cookie-attributes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.cookie-attr {
+  background: #333;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  color: #ccc;
+}
+
+.cookie-diff {
+  background: #111;
+  padding: 10px;
+  border-radius: 4px;
+  margin-top: 10px;
+}
+
+.diff-row {
+  display: flex;
+  gap: 10px;
+  font-family: monospace;
+  font-size: 0.9em;
+  padding: 2px 0;
+}
+
+.diff-row.old {
+  color: #e74c3c;
+}
+
+.diff-row.new {
+  color: #2ecc71;
+}
+
+.diff-label {
+  width: 40px;
+  opacity: 0.7;
+}
+
+.diff-val {
+  word-break: break-all;
+}
+
+.cookie-stack {
+  margin-top: 10px;
+  border-top: 1px solid #333;
+  padding-top: 10px;
+}
+
+.cookie-stack summary {
+  cursor: pointer;
+  color: #888;
+  font-size: 0.9em;
+}
+
+.cookie-stack summary:hover {
+  color: #ccc;
 }
 </style>
