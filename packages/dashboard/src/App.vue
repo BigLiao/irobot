@@ -489,7 +489,9 @@ onUnmounted(() => {
 // ============= Cookie 模块 =============
 const cookieLogs = computed(() => {
   return logs.value.filter(
-    (log) => log.type === 'FINGERPRINT_EVENT' && log.data?.category === 'cookie'
+    (log) =>
+      (log.type === 'FINGERPRINT_EVENT' && log.data?.category === 'cookie') ||
+      (log.type === 'HTTP_SET_COOKIE')
   );
 });
 
@@ -759,8 +761,8 @@ function getCookieDiff(currentLog: Log, index: number) {
                   </option>
                 </select>
               </div>
-              <pre class="stack-content">{{ log.stacks[log.selectedStackIndex || 0].content }}</pre>
-              <div class="stack-time">时间: {{ new Date(log.stacks[log.selectedStackIndex || 0].timestamp).toLocaleTimeString() }}</div>
+              <pre class="stack-content">{{ log.stacks?.[(log.selectedStackIndex || 0)]?.content || '' }}</pre>
+              <div class="stack-time">时间: {{ new Date(log.stacks?.[(log.selectedStackIndex || 0)]?.timestamp || log.timestamp).toLocaleTimeString() }}</div>
             </div>
             <pre v-else class="stack-content">{{ log.data.stack }}</pre>
           </details>
@@ -779,48 +781,70 @@ function getCookieDiff(currentLog: Log, index: number) {
       </div>
 
       <div v-if="cookieLogs.length === 0" class="empty-state">
-        <p>暂无 Cookie 变更记录</p>
-        <p class="hint">当页面修改 document.cookie 时会显示在这里</p>
+        <p>暂无 Cookie 记录</p>
+        <p class="hint">当页面修改 document.cookie 或响应包含 Set-Cookie 时会显示在这里</p>
       </div>
 
       <div v-else class="cookie-list">
         <div v-for="(log, index) in cookieLogs" :key="index" class="cookie-item">
-          <div class="cookie-item-header">
-            <span class="cookie-time">{{ new Date(log.timestamp).toLocaleTimeString() }}</span>
-            <span class="cookie-action">SET</span>
-            <span class="cookie-key">{{ log.data.detail?.parsed?.key }}</span>
-          </div>
-          
-          <div class="cookie-content">
-            <div class="cookie-value-row">
-              <span class="label">Value:</span>
-              <span class="value">{{ log.data.detail?.parsed?.value }}</span>
+          <!-- document.cookie 事件展示 -->
+          <template v-if="log.type === 'FINGERPRINT_EVENT'">
+            <div class="cookie-item-header">
+              <span class="cookie-time">{{ new Date(log.timestamp).toLocaleTimeString() }}</span>
+              <span class="cookie-action">SET</span>
+              <span class="cookie-key">{{ log.data.detail?.parsed?.key }}</span>
             </div>
             
-            <div v-if="log.data.detail?.parsed?.attributes" class="cookie-attributes">
-              <span v-for="(val, key) in log.data.detail.parsed.attributes" :key="key" class="cookie-attr">
-                {{ key }}{{ val === true ? '' : `=${val}` }}
-              </span>
+            <div class="cookie-content">
+              <div class="cookie-value-row">
+                <span class="label">Value:</span>
+                <span class="value">{{ log.data.detail?.parsed?.value }}</span>
+              </div>
+              
+              <div v-if="log.data.detail?.parsed?.attributes" class="cookie-attributes">
+                <span v-for="(val, key) in log.data.detail.parsed.attributes" :key="key" class="cookie-attr">
+                  {{ key }}{{ val === true ? '' : `=${val}` }}
+                </span>
+              </div>
+              
+              <!-- Diff View -->
+              <div v-if="getCookieDiff(log, index).type === 'changed'" class="cookie-diff">
+                <div class="diff-row old">
+                  <span class="diff-label">Old:</span>
+                  <span class="diff-val">{{ getCookieDiff(log, index).diff?.[0]?.value }}</span>
+                </div>
+                <div class="diff-row new">
+                  <span class="diff-label">New:</span>
+                  <span class="diff-val">{{ getCookieDiff(log, index).diff?.[1]?.value }}</span>
+                </div>
+              </div>
             </div>
             
-            <!-- Diff View -->
-            <div v-if="getCookieDiff(log, index).type === 'changed'" class="cookie-diff">
-              <div class="diff-row old">
-                <span class="diff-label">Old:</span>
-                <span class="diff-val">{{ getCookieDiff(log, index).diff[0].value }}</span>
+            <!-- Stack Trace -->
+            <details v-if="log.data.stack" class="cookie-stack">
+              <summary>📚 调用栈</summary>
+              <pre class="stack-content">{{ log.data.stack }}</pre>
+            </details>
+          </template>
+
+          <!-- HTTP Set-Cookie 响应展示 -->
+          <template v-else-if="log.type === 'HTTP_SET_COOKIE'">
+            <div class="cookie-item-header">
+              <span class="cookie-time">{{ new Date(log.timestamp).toLocaleTimeString() }}</span>
+              <span class="cookie-action">HTTP</span>
+              <span class="cookie-key">Set-Cookie</span>
+            </div>
+            <div class="cookie-content">
+              <div class="cookie-value-row">
+                <span class="label">URL:</span>
+                <span class="value">{{ log.data.url }}</span>
               </div>
-              <div class="diff-row new">
-                <span class="diff-label">New:</span>
-                <span class="diff-val">{{ getCookieDiff(log, index).diff[1].value }}</span>
+              <div class="cookie-value-row">
+                <span class="label">Value:</span>
+                <span class="value">{{ log.data.cookie }}</span>
               </div>
             </div>
-          </div>
-          
-          <!-- Stack Trace -->
-          <details v-if="log.data.stack" class="cookie-stack">
-            <summary>📚 调用栈</summary>
-            <pre class="stack-content">{{ log.data.stack }}</pre>
-          </details>
+          </template>
         </div>
       </div>
     </div>

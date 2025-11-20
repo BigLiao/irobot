@@ -6,6 +6,9 @@ export { };
 declare global {
   interface Window {
     __IROBOT_MONITOR_LOADED__?: boolean;
+    __IROBOT_BRIDGE__?: {
+      sendFromNode: (type: string, data: any) => void;
+    };
   }
   // 占位符变量 - 在注入时会被替换为实际值
   const MOCK_RULES_PLACEHOLDER: any;
@@ -61,6 +64,7 @@ if (window.__IROBOT_MONITOR_LOADED__) {
   }
   setupHooks();
   initWebSocket();
+  setupNodeBridge();
 }
 
 function setupHooks() {
@@ -166,6 +170,28 @@ function flushMessageQueue() {
     if (message) {
       ws.send(message);
     }
+  }
+}
+
+// 提供给 Node 端（Puppeteer）使用的桥，用于把 Node 捕获到的事件转发给 Dashboard
+function setupNodeBridge() {
+  try {
+    // 避免被覆盖
+    if (window.__IROBOT_BRIDGE__ && typeof window.__IROBOT_BRIDGE__!.sendFromNode === 'function') {
+      return;
+    }
+    window.__IROBOT_BRIDGE__ = {
+      sendFromNode: (type: string, data: any) => {
+        try {
+          sendMessage(type, data);
+        } catch (e) {
+          console.error('[Injector] NodeBridge 转发失败:', e);
+        }
+      }
+    };
+    console.log('[Injector] Node Bridge 已安装');
+  } catch (e) {
+    console.warn('[Injector] 安装 Node Bridge 失败:', e);
   }
 }
 
@@ -1241,4 +1267,3 @@ function hookPerformanceApis() {
 }
 
 console.log('✅ iRobot 指纹监控脚本已加载');
-

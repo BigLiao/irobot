@@ -71,6 +71,39 @@ if (customScriptFile) {
 
 async function main() {
   let browser: Browser | null = null;
+  // 暂存需要通过页面桥转发到 Dashboard 的事件（在桥未就绪时缓存）
+  const pendingBridgeEvents: { type: string; data: any }[] = [];
+
+  // 通过注入的页面桥把事件发送到 Dashboard（由 monitor 脚本的 WebSocket 负责转发）
+  async function sendViaPageBridge(page: Page, type: string, data: any): Promise<boolean> {
+    try {
+      const ok = await page.evaluate((payload) => {
+        // @ts-ignore
+        const bridge = (window as any).__IROBOT_BRIDGE__;
+        if (bridge && typeof bridge.sendFromNode === 'function') {
+          bridge.sendFromNode(payload.type, payload.data);
+          return true;
+        }
+        return false;
+      }, { type, data });
+      return !!ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function flushPending(page: Page) {
+    if (pendingBridgeEvents.length === 0) return;
+    const copy = pendingBridgeEvents.splice(0, pendingBridgeEvents.length);
+    for (const evt of copy) {
+      const ok = await sendViaPageBridge(page, evt.type, evt.data);
+      if (!ok) {
+        // 仍未就绪，放回队列尾部
+        pendingBridgeEvents.push(evt);
+        break;
+      }
+    }
+  }
 
   try {
     console.log('\n🚀 正在启动 Chromium 浏览器...');
@@ -165,6 +198,45 @@ async function main() {
       }
     });
 
+    // 监听响应，收集 Set-Cookie
+    page.on('response', async (response) => {
+      try {
+        // Puppeteer v24+ 支持 headersArray，优先使用以保留重复头
+        const url = response.url();
+        const cookies: string[] = [];
+        const anyResp: any = response as any;
+        if (typeof anyResp.headersArray === 'function') {
+          const arr = anyResp.headersArray() as { name: string; value: string }[];
+          for (const h of arr) {
+            if (h.name && h.name.toLowerCase() === 'set-cookie') {
+              cookies.push(h.value);
+            }
+          }
+        } else {
+          const headers = response.headers();
+          const sc = (headers['set-cookie'] || headers['Set-Cookie']) as any;
+          if (Array.isArray(sc)) {
+            cookies.push(...sc);
+          } else if (typeof sc === 'string' && sc) {
+            // 作为降级，仅把整串作为一个 cookie 值
+            cookies.push(sc);
+          }
+        }
+
+        if (cookies.length > 0) {
+          for (const cookie of cookies) {
+            const data = { url, cookie };
+            const ok = await sendViaPageBridge(page, 'HTTP_SET_COOKIE', data);
+            if (!ok) {
+              pendingBridgeEvents.push({ type: 'HTTP_SET_COOKIE', data });
+            }
+          }
+        }
+      } catch (e) {
+        console.error('❌ 处理响应头失败:', e);
+      }
+    });
+
     await page.goto(targetUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 30000,
@@ -177,6 +249,8 @@ async function main() {
     // 注入脚本到页面
     await page.evaluateOnNewDocument(injectorScript);
     await page.evaluate(injectorScript);
+    // 注入完成后，尝试刷新缓存的事件
+    await flushPending(page);
 
     console.log('✅ 监控脚本已注入成功');
 
@@ -194,6 +268,11 @@ async function main() {
     console.log('\n🎯 监控正在进行中...');
     console.log('💡 提示: 在页面中进行的所有 API 调用都会被捕获');
     console.log('💡 提示: 按 Ctrl+C 停止监控并关闭浏览器\n');
+
+    // 在每次 DOM 就绪时再次尝试刷新（应对页面重载导致桥重建）
+    page.on('domcontentloaded', async () => {
+      await flushPending(page);
+    });
 
     // 保持进程运行
     await new Promise(() => { });
