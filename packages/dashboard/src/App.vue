@@ -355,11 +355,6 @@ const connectWebSocket = () => {
         activeTab.value = 'varpatrol';
       }
       
-      // 限制日志数量
-      if (logs.value.length > 1000) {
-        logs.value = logs.value.slice(0, 1000);
-        rebuildHashMap(); // 重建索引
-      }
     } catch (error) {
       console.error('解析 WebSocket 消息错误:', error);
     }
