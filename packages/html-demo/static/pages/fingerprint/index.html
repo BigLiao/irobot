@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FingerprintJS Demo</title>
+</head>
+
+<body>
+    <h1>FingerprintJS Demo</h1>
+    <p>Check the console for the visitor identifier.</p>
+    <script>
+        // Initialize the agent at application startup.
+        // If you're using an ad blocker or Brave/Firefox, this import will not work.
+        // Please use the NPM package instead: https://t.ly/ORyXk
+        const fpPromise = import('https://openfpcdn.io/fingerprintjs/v4.4.1')
+            .then(FingerprintJS => FingerprintJS.load())
+
+        // Get the visitor identifier when you need it.
+        fpPromise
+            .then(fp => fp.get())
+            .then(result => {
+                // This is the visitor identifier:
+                const visitorId = result.visitorId
+                console.log(visitorId)
+
+                // Also display it on the page
+                const p = document.createElement('p');
+                p.textContent = `Visitor ID: ${visitorId}`;
+                document.body.appendChild(p);
+            })
+    </script>
+</body>
+
+</html>
