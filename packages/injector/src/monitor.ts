@@ -231,7 +231,7 @@ function collectVariableSnapshot() {
       const v = eq >= 0 ? t.slice(eq + 1) : '';
       if (k) cookies[k] = v;
     });
-  } catch {}
+  } catch { }
 
   // storages
   const snapshotStorage = (s: Storage) => {
@@ -241,7 +241,7 @@ function collectVariableSnapshot() {
         const key = s.key(i);
         if (key) o[key] = s.getItem(key) ?? '';
       }
-    } catch {}
+    } catch { }
     return o;
   };
   const local = snapshotStorage(localStorage);
@@ -291,7 +291,7 @@ function collectVariableSnapshot() {
         if (flatCount >= MAX_FLAT_COUNT) break;
         try {
           flatten(value[i], `${base}.${i}`, depth + 1);
-        } catch {}
+        } catch { }
       }
       return;
     }
@@ -304,7 +304,7 @@ function collectVariableSnapshot() {
           globalsFlat[base] = (value as Date).toISOString() as any;
           flatCount++;
         }
-      } catch {}
+      } catch { }
       return;
     }
 
@@ -314,7 +314,7 @@ function collectVariableSnapshot() {
       try {
         const v = value[k];
         flatten(v, `${base}.${k}`, depth + 1);
-      } catch {}
+      } catch { }
     }
   };
 
@@ -341,8 +341,11 @@ function collectVariableSnapshot() {
 }
 
 function reportFingerprintEvent(category: FingerprintCategory, api: string, detail?: Record<string, any>) {
+  // 先捕获堆栈
+  const stack = captureStack();
+
   // 生成事件 Hash，用于在 Dashboard 端去重和计数
-  const eventHash = generateEventHash(category, api, detail);
+  const eventHash = generateEventHash(category, api, detail, stack);
 
   // 检查是否有匹配的修改规则
   const matchedRule = findMatchingMockRule(api);
@@ -352,7 +355,7 @@ function reportFingerprintEvent(category: FingerprintCategory, api: string, deta
     api,
     detail,
     url: window.location.href,
-    stack: captureStack(),
+    stack,
     eventHash,
     modified: !!matchedRule, // 标记是否被修改
   };
@@ -370,8 +373,20 @@ function findMatchingMockRule(api: string): MockRule | null {
 }
 
 // 生成事件唯一标识
-function generateEventHash(category: FingerprintCategory, api: string, detail?: Record<string, any>): string {
+function generateEventHash(category: FingerprintCategory, api: string, detail?: Record<string, any>, stack?: string): string {
   try {
+    if (stack) {
+      // 使用堆栈的前3行作为特征
+      const lines = stack.split('\n').slice(0, 3).join('\n');
+      let hash = 0;
+      for (let i = 0; i < lines.length; i++) {
+        const char = lines.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32bit integer
+      }
+      return `${category}_${api}_stack_${Math.abs(hash).toString(36)}`;
+    }
+
     // 提取关键信息用于生成 Hash
     const hashData = {
       category,
@@ -472,7 +487,7 @@ function buildCanvasDetail(canvas: HTMLCanvasElement, args: any[], api: string, 
     className: canvas.className || undefined,
     mimeType: args[0],
     quality: args[1],
-    snapshot: captureSnapshot ? captureCanvasSnapshot(canvas, true) : undefined,
+    snapshot: captureSnapshot ? captureCanvasSnapshot(canvas, false) : undefined,
   };
 }
 

@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 
+interface CallRecord {
+  timestamp: string;
+  data: any;
+  stack?: string;
+}
+
 interface Log {
   type: string;
   data: any;
@@ -8,8 +14,8 @@ interface Log {
   count?: number; // 调用次数
   eventHash?: string; // 事件哈希，用于去重
   modified?: boolean; // 是否被修改过
-  stacks?: { timestamp: string; content: string }[]; // 调用栈历史
-  selectedStackIndex?: number; // 当前选中的调用栈索引
+  callRecords?: CallRecord[]; // 调用记录列表
+  selectedRecordIndex?: number; // 当前选中的记录索引
 }
 
 interface MockRule {
@@ -21,6 +27,8 @@ interface MockRule {
   response: any; // 返回数据
   enabled: boolean; // 是否启用
 }
+
+
 
 const logs = ref<Log[]>([]);
 const searchQuery = ref('');
@@ -118,6 +126,85 @@ const filteredLogs = computed(() => {
   return base.filter((log) => matchesSearch(log, q));
 });
 
+// Three-level grouping: API → Stack Hash → Call Records
+interface StackGroup {
+  stackHash: string;
+  stackPreview: string; // First line of stack for display
+  logs: Log[]; // All logs with this stack hash
+  totalCalls: number;
+  lastTimestamp: string;
+}
+
+interface ApiGroup {
+  api: string;
+  category: string;
+  totalCalls: number;
+  stackGroups: StackGroup[];
+  lastTimestamp: string;
+}
+
+const groupedLogs = computed(() => {
+  const apiMap = new Map<string, ApiGroup>();
+  
+  filteredLogs.value.forEach((log) => {
+    if (log.type !== 'FINGERPRINT_EVENT') return;
+    
+    const api = log.data?.api || 'Unknown';
+    const category = log.data?.category || 'unknown';
+    const stackHash = log.eventHash || '';
+    const stack = log.data?.stack || log.callRecords?.[0]?.stack || '';
+    
+    // Use 3rd line of stack (index 2) as preview, since first 2 lines are hook code
+    const stackLines = stack ? stack.split('\n') : [];
+    const stackPreview = stackLines.length >= 3 ? stackLines[2] : (stackLines[0] || 'No stack');
+    
+    // Get or create API group
+    if (!apiMap.has(api)) {
+      apiMap.set(api, {
+        api,
+        category,
+        totalCalls: 0,
+        stackGroups: [],
+        lastTimestamp: log.timestamp
+      });
+    }
+    
+    const apiGroup = apiMap.get(api)!;
+    apiGroup.totalCalls += (log.count || 1);
+    if (log.timestamp > apiGroup.lastTimestamp) {
+      apiGroup.lastTimestamp = log.timestamp;
+    }
+    
+    // Get or create stack group
+    let stackGroup = apiGroup.stackGroups.find(sg => sg.stackHash === stackHash);
+    if (!stackGroup) {
+      stackGroup = {
+        stackHash,
+        stackPreview,
+        logs: [],
+        totalCalls: 0,
+        lastTimestamp: log.timestamp
+      };
+      apiGroup.stackGroups.push(stackGroup);
+    }
+    
+    stackGroup.logs.push(log);
+    stackGroup.totalCalls += (log.count || 1);
+    if (log.timestamp > stackGroup.lastTimestamp) {
+      stackGroup.lastTimestamp = log.timestamp;
+    }
+  });
+  
+  // Convert to array and sort by last timestamp (most recent first)
+  const result = Array.from(apiMap.values());
+  result.sort((a, b) => b.lastTimestamp.localeCompare(a.lastTimestamp));
+  result.forEach(apiGroup => {
+    apiGroup.stackGroups.sort((a, b) => b.lastTimestamp.localeCompare(a.lastTimestamp));
+  });
+  
+  return result;
+});
+
 function getCategoryIcon(category: string): string {
   const icons: Record<string, string> = {
     canvas: '🎨',
@@ -179,9 +266,14 @@ const connectWebSocket = () => {
         });
         // 发送修改规则到injector
         sendMockRules();
-      } else if (log.type === 'FINGERPRINT_EVENT' && log.data?.eventHash) {
+      } else if (log.type === 'FINGERPRINT_EVENT') {
         // 指纹事件：根据 eventHash 去重和计数
-        const eventHash = log.data.eventHash;
+        // eventHash 现在由 injector 生成，包含了 stack 信息（如果有）
+        const eventHash = log.data?.eventHash || log.eventHash;
+        
+        // 确保存储 hash
+        log.eventHash = eventHash;
+
         const existingIndex = eventHashMap.get(eventHash);
         
         if (existingIndex !== undefined && logs.value[existingIndex]) {
@@ -190,29 +282,34 @@ const connectWebSocket = () => {
           existingLog.count = (existingLog.count || 1) + 1;
           existingLog.timestamp = log.timestamp; // 更新最后调用时间
           
-          // 添加新的调用栈到历史记录
-          if (log.data.stack) {
-            if (!existingLog.stacks) {
-              existingLog.stacks = [];
-              // 如果之前没有stacks数组，把当前的stack放进去作为第一个
-              if (existingLog.data.stack) {
-                existingLog.stacks.push({
-                  timestamp: existingLog.timestamp, // 注意这里可能时间不准，但作为初始值尚可
-                  content: existingLog.data.stack
-                });
-              }
+          // 添加新的调用记录
+          if (!existingLog.callRecords) {
+            existingLog.callRecords = [];
+            // 迁移旧数据（如果有）
+            if (existingLog.data) {
+              existingLog.callRecords.push({
+                timestamp: existingLog.timestamp,
+                data: existingLog.data,
+                stack: existingLog.data.stack
+              });
             }
-            existingLog.stacks.push({
-              timestamp: log.timestamp,
-              content: log.data.stack
-            });
-            // 限制堆栈历史数量，防止内存无限增长
-            if (existingLog.stacks.length > 50) {
-              existingLog.stacks.shift();
-            }
-            // 自动选择最新的堆栈
-            existingLog.selectedStackIndex = existingLog.stacks.length - 1;
           }
+          
+          existingLog.callRecords.push({
+            timestamp: log.timestamp,
+            data: log.data,
+            stack: log.data.stack
+          });
+
+          // 限制记录数量
+          if (existingLog.callRecords.length > 50) {
+            existingLog.callRecords.shift();
+          }
+          
+          // 自动选择最新的记录
+          existingLog.selectedRecordIndex = existingLog.callRecords.length - 1;
+          // 更新显示的数据为最新数据
+          existingLog.data = log.data;
 
           // 更新modified标记
           if (log.data?.modified) {
@@ -225,11 +322,12 @@ const connectWebSocket = () => {
             count: 1,
             eventHash,
             modified: log.data?.modified || false,
-            stacks: log.data.stack ? [{
+            callRecords: [{
               timestamp: log.timestamp,
-              content: log.data.stack
-            }] : [],
-            selectedStackIndex: 0
+              data: log.data,
+              stack: log.data.stack
+            }],
+            selectedRecordIndex: 0
           };
           logs.value.unshift(newLog);
           // 更新 hash 映射（索引会因为 unshift 而改变，需要重建）
@@ -796,121 +894,116 @@ function getCookieDiff(currentLog: Log, index: number) {
       </div>
 
       <div class="logs-container">
-      <div v-if="filteredLogs.length === 0" class="empty-state">
-        <p>暂无日志记录</p>
-        <p class="hint">输入URL并点击"开始监控"按钮开始监控网页行为</p>
-      </div>
-      
-      <div v-for="(log, index) in filteredLogs" :key="index" class="log-entry" :class="getLogClass(log)">
-        <div class="log-header">
-          <span class="log-type-badge">
-            <span v-if="log.type === 'FINGERPRINT_EVENT' && log.data?.category" class="category-badge">
-              {{ getCategoryIcon(log.data.category) }} {{ log.data.category }}
-            </span>
-            <span v-else>{{ log.type }}</span>
-          </span>
-          <span class="log-timestamp">{{ new Date(log.timestamp).toLocaleTimeString() }}</span>
+        <div v-if="groupedLogs.length === 0" class="empty-state">
+          <p>暂无日志记录</p>
+          <p class="hint">输入URL并点击"开始监控"按钮开始监控网页行为</p>
         </div>
 
-        <div v-if="log.type === 'FINGERPRINT_EVENT'" class="fingerprint-detail">
-          <div class="api-info">
-            <strong>API:</strong> {{ log.data.api }}
-            <span v-if="log.count && log.count > 1" class="call-count-badge">
-              调用 {{ log.count }} 次
-            </span>
-            <span v-if="log.data.detail?.duration" class="duration-badge">
-              {{ log.data.detail.duration.toFixed(2) }}ms
-            </span>
-            <span v-if="log.modified" class="modified-badge">
-              ✅ 已修改
-            </span>
-            <button class="quick-mock-btn" @click="quickMockFromLog(log)" title="快捷添加到修改模块">
-              🔧 修改
-            </button>
-          </div>
-          <div v-if="log.data.url" class="url-info">
-            <strong>URL:</strong> <span class="url-text">{{ log.data.url }}</span>
-          </div>
+        <!-- Level 1: API Groups -->
+        <details v-for="apiGroup in groupedLogs" :key="apiGroup.api" class="api-group" open>
+          <summary class="api-group-header">
+            <span class="api-icon">{{ getCategoryIcon(apiGroup.category) }}</span>
+            <span class="api-name">{{ apiGroup.api }}</span>
+            <span class="api-badge">{{ apiGroup.totalCalls }} 次调用</span>
+            <span class="api-timestamp">{{ new Date(apiGroup.lastTimestamp).toLocaleTimeString() }}</span>
+          </summary>
 
-          <!-- 输入参数 -->
-          <details v-if="log.data.detail?.input" class="param-section" open>
-            <summary>📥 输入参数</summary>
-            <pre class="param-data">{{ JSON.stringify(log.data.detail.input, null, 2) }}</pre>
-          </details>
-
-          <!-- 输出结果 -->
-          <details v-if="log.data.detail?.output" class="param-section" open>
-            <summary>📤 输出结果</summary>
-            <pre class="param-data">{{ JSON.stringify(log.data.detail.output, null, 2) }}</pre>
-          </details>
-
-          <!-- Canvas 快照 -->
-          <div v-if="log.data.detail?.snapshot" class="snapshot-container">
-            <div class="snapshot-header">
-              <div class="snapshot-label">📸 Canvas 快照</div>
-              <div class="snapshot-info">
-                <span v-if="log.data.detail?.width">{{ log.data.detail.width }}x{{ log.data.detail.height }}</span>
-              </div>
-            </div>
-            <img :src="log.data.detail.snapshot" alt="Canvas Snapshot" class="canvas-snapshot" @click="openImagePreview(log.data.detail.snapshot)" />
-            
-            <!-- 原始数据预览 -->
-            <details class="snapshot-raw-data">
-              <summary>🔍 原始 Base64 数据</summary>
-              <div class="raw-data-preview">
-                <div class="data-stats">
-                  <span>大小: {{ formatDataSize(log.data.detail.snapshot) }}</span>
-                  <span>格式: {{ getImageFormat(log.data.detail.snapshot) }}</span>
-                </div>
-                <textarea class="raw-data-text" :value="log.data.detail.snapshot" readonly></textarea>
-                <button class="copy-btn" @click="copyToClipboard(log.data.detail.snapshot)">📋 复制</button>
-              </div>
-            </details>
-          </div>
-
-          <!-- 其他详情 -->
-          <details v-if="hasOtherDetails(log.data.detail)" class="param-section">
-            <summary>ℹ️ 其他详情</summary>
-            <pre class="param-data">{{ JSON.stringify(getOtherDetails(log.data.detail), null, 2) }}</pre>
-          </details>
-
-          <!-- 调用栈 -->
-          <details v-if="log.data.stack" class="stack-trace">
-            <summary>
-              📚 调用栈 
-              <span v-if="log.stacks && log.stacks.length > 1" class="stack-count-badge">
-                {{ log.stacks.length }} 个记录
-              </span>
+          <!-- Level 2: Stack Groups -->
+          <details v-for="(stackGroup, sgIdx) in apiGroup.stackGroups" :key="sgIdx" class="stack-group">
+            <summary class="stack-group-header">
+              <span class="stack-preview">{{ stackGroup.stackPreview }}</span>
+              <span class="stack-badge">{{ stackGroup.totalCalls }} 次</span>
+              <span class="stack-timestamp">{{ new Date(stackGroup.lastTimestamp).toLocaleTimeString() }}</span>
             </summary>
-            
-            <div v-if="log.stacks && log.stacks.length > 1" class="stack-switcher">
-              <div class="stack-controls">
-                <label>选择调用记录:</label>
-                <select 
-                  v-model="log.selectedStackIndex" 
-                  @click.stop 
-                  class="stack-select"
-                >
-                  <option 
-                    v-for="(stack, i) in log.stacks" 
-                    :key="i" 
-                    :value="i"
-                  >
-                    #{{ i + 1 }} - {{ new Date(stack.timestamp).toLocaleTimeString() }}
-                  </option>
-                </select>
-              </div>
-              <pre class="stack-content">{{ log.stacks?.[(log.selectedStackIndex || 0)]?.content || '' }}</pre>
-              <div class="stack-time">时间: {{ new Date(log.stacks?.[(log.selectedStackIndex || 0)]?.timestamp || log.timestamp).toLocaleTimeString() }}</div>
-            </div>
-            <pre v-else class="stack-content">{{ log.data.stack }}</pre>
-          </details>
-        </div>
 
-        <pre v-else class="log-data">{{ JSON.stringify(log.data, null, 2) }}</pre>
+            <!-- Level 3: Individual Calls -->
+            <div class="call-list">
+              <details v-for="(log, logIdx) in stackGroup.logs" :key="logIdx" class="call-item">
+                <summary class="call-item-header">
+                  <span class="call-timestamp">{{ new Date(log.timestamp).toLocaleTimeString() }}</span>
+                  <span v-if="log.count && log.count > 1" class="call-count">{{ log.count }} 次</span>
+                  <span v-if="log.data.detail?.duration" class="call-duration">{{ log.data.detail.duration.toFixed(2) }}ms</span>
+                  <span v-if="log.modified" class="modified-badge">✅ 已修改</span>
+                  <button class="quick-mock-btn" @click.stop="quickMockFromLog(log)" title="快捷添加到修改模块">🔧</button>
+                </summary>
+
+                <!-- Call Details -->
+                <div class="call-details">
+                  <!-- Record Switcher -->
+                  <div v-if="log.callRecords && log.callRecords.length > 1" class="record-switcher">
+                    <label>调用记录:</label>
+                    <select v-model="log.selectedRecordIndex" @click.stop class="record-select">
+                      <option v-for="(record, i) in log.callRecords" :key="i" :value="i">
+                        #{{ i + 1 }} - {{ new Date(record.timestamp).toLocaleTimeString() }}
+                      </option>
+                    </select>
+                    <span class="record-count">共 {{ log.callRecords.length }} 条</span>
+                  </div>
+
+                  <!-- Dynamic data display -->
+                  <div v-if="log.callRecords && log.callRecords[log.selectedRecordIndex || 0]" class="record-detail">
+                    <!-- Input Parameters -->
+                    <details v-if="log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.input" class="param-section" open>
+                      <summary>📥 输入参数</summary>
+                      <pre class="param-data">{{ JSON.stringify(log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.input, null, 2) }}</pre>
+                    </details>
+
+                    <!-- Output Results -->
+                    <details v-if="log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.output" class="param-section" open>
+                      <summary>📤 输出结果</summary>
+                      <pre class="param-data">{{ JSON.stringify(log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.output, null, 2) }}</pre>
+                    </details>
+
+                    <!-- Canvas Snapshot -->
+                    <div v-if="log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.snapshot" class="snapshot-container">
+                      <div class="snapshot-header">
+                        <div class="snapshot-label">📸 Canvas 快照</div>
+                        <div class="snapshot-info">
+                          <span v-if="log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.width">
+                            {{ log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.width }}x{{ log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.height }}
+                          </span>
+                        </div>
+                      </div>
+                      <img 
+                        :src="log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.snapshot" 
+                        alt="Canvas Snapshot" 
+                        class="canvas-snapshot" 
+                        @click="openImagePreview(log.callRecords[log.selectedRecordIndex || 0]?.data?.detail?.snapshot)" 
+                      />
+                    </div>
+
+                    <!-- Other Details -->
+                    <details v-if="hasOtherDetails(log.callRecords[log.selectedRecordIndex || 0]?.data?.detail)" class="param-section">
+                      <summary>ℹ️ 其他详情</summary>
+                      <pre class="param-data">{{ JSON.stringify(getOtherDetails(log.callRecords[log.selectedRecordIndex || 0]?.data?.detail), null, 2) }}</pre>
+                    </details>
+
+                    <!-- Stack Trace -->
+                    <details v-if="log.callRecords[log.selectedRecordIndex || 0]?.stack" class="stack-trace">
+                      <summary>📚 调用栈</summary>
+                      <pre class="stack-content">{{ log.callRecords[log.selectedRecordIndex || 0]?.stack }}</pre>
+                    </details>
+                  </div>
+
+                  <!-- Fallback for old data -->
+                  <div v-else>
+                    <details v-if="log.data.detail?.input" class="param-section" open>
+                      <summary>📥 输入参数</summary>
+                      <pre class="param-data">{{ JSON.stringify(log.data.detail.input, null, 2) }}</pre>
+                    </details>
+                    <details v-if="log.data.stack" class="stack-trace">
+                      <summary>📚 调用栈</summary>
+                      <pre class="stack-content">{{ log.data.stack }}</pre>
+                    </details>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </details>
+        </details>
       </div>
     </div>
-    </div>
+
 
     <!-- Cookie 模块 -->
     <div v-show="activeTab === 'cookie'" class="cookie-container">
@@ -1561,6 +1654,196 @@ function getCookieDiff(currentLog: Log, index: number) {
   font-size: 14px;
   color: #bbb;
 }
+
+/* Three-Level Hierarchy Styles */
+
+/* Level 1: API Groups */
+.api-group {
+  margin-bottom: 16px;
+  border-radius: 12px;
+  border: 2px solid #e0e0e0;
+  background: white;
+  overflow: hidden;
+  animation: slideIn 0.3s ease-out;
+}
+
+.api-group-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 15px;
+  user-select: none;
+  transition: all 0.3s;
+}
+
+.api-group-header:hover {
+  background: linear-gradient(135deg, #5568d3 0%, #653a8b 100%);
+}
+
+.api-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.api-name {
+  flex: 1;
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+}
+
+.api-badge {
+  background: rgba(255, 255, 255, 0.3);
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.api-timestamp {
+  font-size: 12px;
+  opacity: 0.9;
+  font-weight: normal;
+}
+
+/* Level 2: Stack Groups */
+.stack-group {
+  margin: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  background: #f8f9fa;
+  overflow: hidden;
+}
+
+.stack-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: #e8e9ed;
+  cursor: pointer;
+  font-size: 13px;
+  user-select: none;
+  transition: background 0.2s;
+}
+
+.stack-group-header:hover {
+  background: #d8d9dd;
+}
+
+.stack-preview {
+  flex: 1;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: #555;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stack-badge {
+  background: #667eea;
+  color: white;
+  padding: 3px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.stack-timestamp {
+  font-size: 11px;
+  color: #777;
+  font-weight: normal;
+}
+
+/* Level 3: Individual Calls */
+.call-list {
+  padding: 8px;
+}
+
+.call-item {
+  margin-bottom: 8px;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+  background: white;
+  overflow: hidden;
+}
+
+.call-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #fafbfc;
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+  transition: background 0.2s;
+}
+
+.call-item-header:hover {
+  background: #f0f1f3;
+}
+
+.call-timestamp {
+  font-family: 'Courier New', monospace;
+  color: #666;
+  font-size: 11px;
+}
+
+.call-count {
+  background: #ff6b6b;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.call-duration {
+  background: #4caf50;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.call-details {
+  padding: 12px 14px;
+  background: white;
+}
+
+/* Record Switcher */
+.record-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px;
+  background: #f8f9fa;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.record-select {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+  background: white;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.record-count {
+  color: #666;
+  font-size: 11px;
+}
+
 
 .log-entry {
   margin-bottom: 12px;
